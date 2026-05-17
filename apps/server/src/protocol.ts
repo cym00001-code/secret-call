@@ -19,6 +19,17 @@ export interface CipherMessage {
   createdAt: number;
 }
 
+export interface LegacyCipherMessage {
+  messageId: string;
+  senderClientId: string;
+  iv: string;
+  ciphertext: string;
+  burnAfterMs: BurnAfterMs;
+  createdAt: number;
+}
+
+export type ClientCipherMessage = CipherMessage | LegacyCipherMessage;
+
 export interface HistoryMessage extends CipherMessage {
   expireAt: number;
   state: PendingMessageState;
@@ -31,6 +42,7 @@ export type ClientEvent =
       type: "room:join";
       roomIdHash: string;
       clientId: string;
+      publicKey?: string;
     }
   | {
       type: "room:leave";
@@ -51,7 +63,7 @@ export type ClientEvent =
       type: "message:send";
       roomIdHash: string;
       clientId: string;
-      message: CipherMessage;
+      message: ClientCipherMessage;
     }
   | {
       type: "message:delivered" | "message:decrypted" | "message:visible";
@@ -65,7 +77,7 @@ export type ClientEvent =
       roomIdHash: string;
       clientId: string;
       messageId: string;
-      seenAt: number;
+      confirm: "user-click";
     }
   | {
       type: "message:burn";
@@ -80,9 +92,14 @@ export type ClientEvent =
       sentAt?: number;
     };
 
+export interface RoomPeer {
+  clientId: string;
+  publicKey: string;
+}
+
 export type ServerEvent =
   | { type: "room:waiting"; serverTime: number }
-  | { type: "room:active"; serverTime: number }
+  | { type: "room:active"; serverTime: number; peers?: RoomPeer[] }
   | { type: "room:peer_offline"; serverTime: number }
   | { type: "room:suspended"; serverTime: number }
   | { type: "room:resumed"; serverTime: number }
@@ -96,8 +113,8 @@ export type ServerEvent =
   | { type: "message:delivered"; messageId: string; byClientId: string; at: number }
   | { type: "message:decrypted"; messageId: string; byClientId: string; at: number }
   | { type: "message:visible"; messageId: string; byClientId: string; at: number }
-  | { type: "message:seen"; messageId: string; seenBy: string; seenAt: number; burnAt: number }
-  | { type: "message:burn"; messageId: string; burnedAt: number }
+  | { type: "message:seen"; messageId: string; seenBy: string; seenAt: number; burnAt: number; serverTime: number }
+  | { type: "message:burn"; messageId: string; burnedAt: number; serverTime: number }
   | { type: "message:failed"; messageId?: string; reason: "unavailable" | "invalid" | "rate_limited" }
   | { type: "peer:left"; serverTime: number }
   | { type: "peer:reconnected"; serverTime: number }

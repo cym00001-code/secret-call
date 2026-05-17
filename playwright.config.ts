@@ -23,6 +23,9 @@ export default defineConfig({
   ],
   webServer: {
     command: "pnpm dev",
+    env: {
+      DISABLE_RATE_LIMIT: "1"
+    },
     url: "http://127.0.0.1:3100",
     reuseExistingServer: false,
     timeout: 90_000

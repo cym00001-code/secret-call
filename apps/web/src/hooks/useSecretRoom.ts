@@ -79,10 +79,19 @@ export const useSecretRoom = () => {
   const roomStateRef = useRef<RoomState>("idle");
   const isBlurredRef = useRef(false);
   const isWindowHiddenRef = useRef(false);
+  const serverTimeOffsetRef = useRef(0);
   const visibleSentRef = useRef(new Set<string>());
   const seenSentRef = useRef(new Set<string>());
   const deliveredSentRef = useRef(new Set<string>());
   const decryptedSentRef = useRef(new Set<string>());
+
+  const estimateServerNow = useCallback(() => Date.now() + serverTimeOffsetRef.current, []);
+
+  const syncServerTime = useCallback((serverTime: number) => {
+    if (!Number.isFinite(serverTime)) return;
+    serverTimeOffsetRef.current = serverTime - Date.now();
+    setNow(serverTime);
+  }, []);
 
   const setRoomStateValue = useCallback((nextState: RoomState) => {
     roomStateRef.current = nextState;
@@ -161,29 +170,19 @@ export const useSecretRoom = () => {
   );
 
   const scheduleBurn = useCallback(
-    (messageId: string, burnAfterMs: BurnAfterMs, burnAt: number) => {
+    (messageId: string, burnAt: number) => {
       const existing = burnTimersRef.current.get(messageId);
       if (existing) clearTimeout(existing);
 
-      const delay = Math.max(0, burnAt - Date.now());
+      const delay = Math.max(0, burnAt - estimateServerNow());
       const timer = setTimeout(() => {
-        const active = activeRef.current;
-        if (active) {
-          sendEvent({
-            type: "message:burn",
-            roomIdHash: active.roomIdHash,
-            clientId: active.clientId,
-            messageId,
-            burnedAt: Date.now()
-          });
-        }
         burnTimersRef.current.delete(messageId);
         setMessages((current) => current.filter((message) => message.id !== messageId));
       }, delay);
 
       burnTimersRef.current.set(messageId, timer);
     },
-    [sendEvent]
+    [estimateServerNow]
   );
 
   const updateMessageStatus = useCallback(
@@ -247,12 +246,11 @@ export const useSecretRoom = () => {
     [sendProgress]
   );
 
-  const canSendSeen = useCallback(() => {
+  const canConfirmSeen = useCallback(() => {
     const socket = wsRef.current;
     return (
       roomStateRef.current === "active" &&
       !isWindowHiddenRef.current &&
-      !isBlurredRef.current &&
       document.visibilityState === "visible" &&
       socket?.readyState === WebSocket.OPEN
     );
@@ -286,7 +284,8 @@ export const useSecretRoom = () => {
               message.id === encrypted.messageId
                 ? {
                     ...message,
-                    text,
+                    decryptedText: text,
+                    ...(from === "me" ? { displayText: text } : {}),
                     ciphertext: encrypted.ciphertext,
                     iv: encrypted.iv,
                     aad: encrypted.aad,
@@ -308,7 +307,8 @@ export const useSecretRoom = () => {
             {
               id: encrypted.messageId,
               from,
-              text,
+              decryptedText: text,
+              ...(from === "me" ? { displayText: text } : {}),
               ciphertext: encrypted.ciphertext,
               iv: encrypted.iv,
               aad: encrypted.aad,
@@ -327,7 +327,7 @@ export const useSecretRoom = () => {
         });
 
         if ((existingStatus === "burning" || existingStatus === "seen") && typeof burnAt === "number") {
-          scheduleBurn(encrypted.messageId, encrypted.burnAfterMs, burnAt);
+          scheduleBurn(encrypted.messageId, burnAt);
         }
       } catch {
         setMessages((current) => {
@@ -337,7 +337,7 @@ export const useSecretRoom = () => {
             {
               id: encrypted.messageId,
               from,
-              text: "鏃犳硶瑙ｅ瘑",
+              displayText: "无法解密",
               ciphertext: encrypted.ciphertext,
               iv: encrypted.iv,
               aad: encrypted.aad,
@@ -353,16 +353,20 @@ export const useSecretRoom = () => {
   );
 
   const markBurning = useCallback(
-    (messageId: string, seenAt: number, burnAt: number) => {
+    (messageId: string, seenBy: string, seenAt: number, burnAt: number) => {
       setMessages((current) =>
         current.map((message) => {
           if (message.id !== messageId) return message;
-          scheduleBurn(message.id, message.burnAfterMs, burnAt);
+          const wasRevealedByThisClient = seenBy === activeRef.current?.clientId;
+          scheduleBurn(message.id, burnAt);
           return {
             ...message,
             status: "burning",
             seenAt,
-            burnAt
+            burnAt,
+            ...(wasRevealedByThisClient && message.decryptedText
+              ? { displayText: message.decryptedText, revealedAt: seenAt }
+              : {})
           };
         })
       );
@@ -372,6 +376,10 @@ export const useSecretRoom = () => {
 
   const handleServerEvent = useCallback(
     async (event: ServerEvent) => {
+      if ("serverTime" in event) {
+        syncServerTime(event.serverTime);
+      }
+
       switch (event.type) {
         case "room:waiting":
           clearJoinTimeout();
@@ -439,7 +447,7 @@ export const useSecretRoom = () => {
           updateMessageStatus(event.messageId, "visible");
           break;
         case "message:seen":
-          markBurning(event.messageId, event.seenAt, event.burnAt);
+          markBurning(event.messageId, event.seenBy, event.seenAt, event.burnAt);
           break;
         case "message:burn":
           removeBurnedMessage(event.messageId);
@@ -488,6 +496,7 @@ export const useSecretRoom = () => {
       markBurning,
       removeBurnedMessage,
       setRoomStateValue,
+      syncServerTime,
       updateMessageStatus,
       wipeLocalSession
     ]
@@ -608,7 +617,8 @@ export const useSecretRoom = () => {
           {
             id: encrypted.messageId,
             from: "me",
-            text: cleanText,
+            decryptedText: cleanText,
+            displayText: cleanText,
             ciphertext: encrypted.ciphertext,
             iv: encrypted.iv,
             aad: encrypted.aad,
@@ -670,67 +680,69 @@ export const useSecretRoom = () => {
     setIsWindowHidden(false);
   }, []);
 
-  useEffect(() => {
-    const tick = setInterval(() => setNow(Date.now()), 250);
-    return () => clearInterval(tick);
-  }, []);
+  const confirmPeerMessageSeen = useCallback(
+    (messageId: string) => {
+      if (!canConfirmSeen() || seenSentRef.current.has(messageId)) return false;
+
+      const message = messages.find((item) => item.id === messageId);
+      if (
+        !message ||
+        message.from !== "peer" ||
+        !message.decryptedText ||
+        message.displayText ||
+        message.status === "undecryptable" ||
+        message.status === "burning" ||
+        message.status === "burned"
+      ) {
+        return false;
+      }
+
+      let visibleReady = visibleSentRef.current.has(message.id);
+      if (!visibleReady) {
+        visibleReady = sendProgress("message:visible", message.id);
+        if (visibleReady) visibleSentRef.current.add(message.id);
+      }
+      if (!visibleReady) return false;
+
+      const active = activeRef.current;
+      if (!active) return false;
+
+      const sent = sendEvent({
+        type: "message:seen",
+        roomIdHash: active.roomIdHash,
+        clientId: active.clientId,
+        messageId: message.id,
+        confirm: "user-click"
+      });
+      if (sent) {
+        seenSentRef.current.add(message.id);
+        updateMessageStatus(message.id, "visible", {
+          displayText: message.decryptedText,
+          revealedAt: estimateServerNow()
+        });
+      }
+      return sent;
+    },
+    [canConfirmSeen, estimateServerNow, messages, sendEvent, sendProgress, updateMessageStatus]
+  );
 
   useEffect(() => {
-    const blur = () => setIsBlurred(true);
-    const focus = () => setIsBlurred(false);
+    const tick = setInterval(() => setNow(estimateServerNow()), 250);
+    return () => clearInterval(tick);
+  }, [estimateServerNow]);
+
+  useEffect(() => {
     const visibility = () => {
-      if (document.hidden) setIsBlurred(true);
-      else setIsBlurred(false);
+      setIsBlurred(document.visibilityState !== "visible");
     };
 
-    window.addEventListener("blur", blur);
-    window.addEventListener("focus", focus);
+    visibility();
     document.addEventListener("visibilitychange", visibility);
 
     return () => {
-      window.removeEventListener("blur", blur);
-      window.removeEventListener("focus", focus);
       document.removeEventListener("visibilitychange", visibility);
     };
   }, []);
-
-  useEffect(() => {
-    if (!canSendSeen()) return;
-
-    for (const message of messages) {
-      if (
-        message.from !== "peer" ||
-        !message.text ||
-        message.status === "undecryptable" ||
-        message.status === "burning" ||
-        message.status === "burned" ||
-        seenSentRef.current.has(message.id)
-      ) {
-        continue;
-      }
-
-      const active = activeRef.current;
-      if (!active) continue;
-
-      if (!visibleSentRef.current.has(message.id)) {
-        if (sendProgress("message:visible", message.id)) {
-          visibleSentRef.current.add(message.id);
-        }
-      }
-
-      if (
-        sendEvent({
-          type: "message:seen",
-          roomIdHash: active.roomIdHash,
-          clientId: active.clientId,
-          messageId: message.id,
-          seenAt: Date.now()
-        })
-      ) {
-        seenSentRef.current.add(message.id);
-      }
-    }
-  }, [canSendSeen, isBlurred, isWindowHidden, messages, roomState, sendEvent, sendProgress]);
 
   useEffect(
     () => () => {
@@ -754,6 +766,7 @@ export const useSecretRoom = () => {
       joinRoom,
       sendTextMessage,
       setSelectedBurnTime,
+      confirmPeerMessageSeen,
       destroyRoom,
       reset,
       hideWindow,
@@ -767,6 +780,7 @@ export const useSecretRoom = () => {
       joinRoom,
       messages,
       now,
+      confirmPeerMessageSeen,
       reset,
       revealWindow,
       roomNumber,

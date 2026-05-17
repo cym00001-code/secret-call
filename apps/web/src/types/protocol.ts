@@ -61,7 +61,8 @@ export interface HistoryMessage extends CipherMessage {
 export interface LocalMessage {
   id: string;
   from: "me" | "peer";
-  text?: string;
+  decryptedText?: string;
+  displayText?: string;
   ciphertext?: string;
   iv?: string;
   aad?: string;
@@ -69,6 +70,7 @@ export interface LocalMessage {
   createdAt: number;
   seenAt?: number;
   burnAt?: number;
+  revealedAt?: number;
   status: LocalMessageStatus;
 }
 
@@ -111,7 +113,7 @@ export type ClientEvent =
       roomIdHash: string;
       clientId: string;
       messageId: string;
-      seenAt: number;
+      confirm: "user-click";
     }
   | {
       type: "message:burn";
@@ -142,8 +144,8 @@ export type ServerEvent =
   | { type: "message:delivered"; messageId: string; byClientId: string; at: number }
   | { type: "message:decrypted"; messageId: string; byClientId: string; at: number }
   | { type: "message:visible"; messageId: string; byClientId: string; at: number }
-  | { type: "message:seen"; messageId: string; seenBy: string; seenAt: number; burnAt: number }
-  | { type: "message:burn"; messageId: string; burnedAt: number }
+  | { type: "message:seen"; messageId: string; seenBy: string; seenAt: number; burnAt: number; serverTime: number }
+  | { type: "message:burn"; messageId: string; burnedAt: number; serverTime: number }
   | { type: "message:failed"; messageId?: string; reason: "unavailable" | "invalid" | "rate_limited" }
   | { type: "peer:left"; serverTime: number }
   | { type: "peer:reconnected"; serverTime: number }

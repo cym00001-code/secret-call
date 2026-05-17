@@ -22,6 +22,11 @@ const joinTwoUsers = async (browser: Browser, room: string, passphrase: string) 
   return { contextA, contextB, pageA, pageB };
 };
 
+const readCountdownSeconds = async (page: Page) => {
+  const text = await page.getByTestId("burn-countdown").last().innerText();
+  return Number(text.replace("s", ""));
+};
+
 test("two users can join the same room without endless loading", async ({ browser }) => {
   const room = `test-room-001-${Date.now()}`;
   const passphrase = "test-pass-001";
@@ -52,37 +57,110 @@ test("third user only sees an unavailable room", async ({ browser }) => {
 test("refresh can restore an unburned encrypted message", async ({ browser }) => {
   const room = `test-room-refresh-${Date.now()}`;
   const passphrase = "test-pass-001";
+  const secretText = "刷新恢复测试消息";
   const { contextA, contextB, pageA, pageB } = await joinTwoUsers(browser, room, passphrase);
 
-  await pageA.getByPlaceholder("输入加密消息...").fill("刷新恢复测试消息");
+  await pageA.getByPlaceholder("输入加密消息...").fill(secretText);
   await pageA.getByRole("button", { name: /发送/ }).click();
-  await expect(pageB.getByText("刷新恢复测试消息")).toBeVisible();
+  await expect(pageB.getByText(secretText)).toHaveCount(0);
+  await expect(pageB.getByText("点击确认查看并启动倒计时")).toBeVisible();
 
   await pageB.reload();
   await pageB.getByPlaceholder("输入房间号").fill(room);
   await pageB.getByPlaceholder("输入房间口令").fill(passphrase);
   await pageB.getByRole("button", { name: /唤醒房间/ }).click();
-  await expect(pageB.getByText("刷新恢复测试消息")).toBeVisible();
+  await expect(pageB.getByText(secretText)).toHaveCount(0);
+  await expect(pageB.getByText("点击确认查看并启动倒计时")).toBeVisible();
+
+  await pageB.getByRole("button", { name: "确认查看消息并启动焚毁倒计时" }).click();
+  await expect(pageB.getByText(secretText)).toBeVisible();
 
   await contextA.close();
   await contextB.close();
 });
 
-test("hidden window does not mark a message as seen until revealed", async ({ browser }) => {
+test("received message does not start burn countdown until the receiver clicks it", async ({ browser }) => {
   const room = `test-room-hidden-${Date.now()}`;
   const passphrase = "test-pass-001";
+  const secretText = "隐藏窗口测试消息";
   const { contextA, contextB, pageA, pageB } = await joinTwoUsers(browser, room, passphrase);
 
   await pageB.getByRole("button", { name: /隐藏/ }).click();
   await expect(pageB.getByText("窗口已隐藏")).toBeVisible();
 
-  await pageA.getByPlaceholder("输入加密消息...").fill("隐藏窗口测试消息");
+  await pageA.getByPlaceholder("输入加密消息...").fill(secretText);
   await pageA.getByRole("button", { name: /发送/ }).click();
   await expect(pageA.getByText(/秒后焚毁/)).toHaveCount(0, { timeout: 3000 });
 
   await pageB.getByRole("button", { name: /恢复显示/ }).click();
-  await expect(pageB.getByText("隐藏窗口测试消息")).toBeVisible();
+  await expect(pageB.getByText(secretText)).toHaveCount(0);
+  await expect(pageB.getByText("点击确认查看并启动倒计时")).toBeVisible();
+  await expect(pageA.getByText(/秒后焚毁/)).toHaveCount(0, { timeout: 3000 });
+
+  await pageB.getByRole("button", { name: "确认查看消息并启动焚毁倒计时" }).click();
+  await expect(pageB.getByText(secretText)).toBeVisible();
   await expect(pageA.getByText(/秒后焚毁/)).toBeVisible();
+  await expect(pageB.getByText(/秒后焚毁/)).toBeVisible();
+
+  await contextA.close();
+  await contextB.close();
+});
+
+test("visible peer message also waits for an explicit click before burning", async ({ browser }) => {
+  const room = `test-room-unfocused-visible-${Date.now()}`;
+  const passphrase = "test-pass-001";
+  const secretText = "失焦但可见测试消息";
+  const { contextA, contextB, pageA, pageB } = await joinTwoUsers(browser, room, passphrase);
+
+  await pageB.evaluate(() => window.dispatchEvent(new Event("blur")));
+  await pageA.getByPlaceholder("输入加密消息...").fill(secretText);
+  await pageA.getByRole("button", { name: /发送/ }).click();
+
+  await expect(pageB.getByText(secretText)).toHaveCount(0);
+  await expect(pageB.getByText("点击确认查看并启动倒计时")).toBeVisible();
+  await expect(pageA.getByText(/秒后焚毁/)).toHaveCount(0, { timeout: 3000 });
+
+  await pageB.getByRole("button", { name: "确认查看消息并启动焚毁倒计时" }).click();
+  await expect(pageB.getByText(secretText)).toBeVisible();
+  await expect(pageA.getByText(/秒后焚毁/)).toBeVisible();
+  await expect(pageB.getByText(/秒后焚毁/)).toBeVisible();
+
+  await contextA.close();
+  await contextB.close();
+});
+
+test("click reveal starts synced 5s burn countdown and deletes on both sides", async ({ browser }) => {
+  const room = `test-room-synced-burn-${Date.now()}`;
+  const passphrase = "test-pass-001";
+  const secretText = `五秒同步删除-${Date.now()}`;
+  const { contextA, contextB, pageA, pageB } = await joinTwoUsers(browser, room, passphrase);
+
+  await pageA.getByRole("button", { name: "5s" }).click();
+  await pageA.getByPlaceholder("输入加密消息...").fill(secretText);
+  await pageA.getByRole("button", { name: /发送/ }).click();
+
+  await expect(pageA.getByText(secretText)).toBeVisible();
+  await expect(pageB.getByText(secretText)).toHaveCount(0);
+  await expect(pageB.getByText("点击确认查看并启动倒计时")).toBeVisible();
+  await expect(pageA.getByText(/秒后焚毁/)).toHaveCount(0, { timeout: 3000 });
+  await expect(pageB.getByText(/秒后焚毁/)).toHaveCount(0, { timeout: 3000 });
+
+  await pageB.getByRole("button", { name: "确认查看消息并启动焚毁倒计时" }).click();
+  await expect(pageB.getByText(secretText)).toBeVisible();
+  await expect(pageA.getByText(/秒后焚毁/)).toBeVisible();
+  await expect(pageB.getByText(/秒后焚毁/)).toBeVisible();
+
+  await expect
+    .poll(async () => {
+      const [leftA, leftB] = await Promise.all([readCountdownSeconds(pageA), readCountdownSeconds(pageB)]);
+      return Math.abs(leftA - leftB);
+    })
+    .toBeLessThanOrEqual(1);
+
+  await expect(pageA.getByText(secretText)).toHaveCount(0, { timeout: 7000 });
+  await expect(pageB.getByText(secretText)).toHaveCount(0, { timeout: 7000 });
+  await expect(pageA.getByText(/秒后焚毁/)).toHaveCount(0);
+  await expect(pageB.getByText(/秒后焚毁/)).toHaveCount(0);
 
   await contextA.close();
   await contextB.close();

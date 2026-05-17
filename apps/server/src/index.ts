@@ -6,6 +6,7 @@ import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   type BurnAfterMs,
   type CipherMessage,
+  type ClientCipherMessage,
   type ClientEvent,
   type HistoryMessage,
   type PendingMessageState,
@@ -21,6 +22,7 @@ interface ClientState {
   ws: WebSocket;
   ipRiskHash: string;
   clientId?: string;
+  publicKey?: string;
   roomIdHash?: string;
   joinedAt: number;
   lastSeenAt: number;
@@ -52,6 +54,7 @@ const suspendedRoomTtlMs = Number.parseInt(process.env.ROOM_SUSPENDED_TTL_MS ?? 
 const messageTtlMs = Number.parseInt(process.env.MESSAGE_TTL_MS ?? "7200000", 10);
 const burnedIdTtlMs = Number.parseInt(process.env.BURNED_ID_TTL_MS ?? "7200000", 10);
 const clientTimeoutMs = Number.parseInt(process.env.CLIENT_TIMEOUT_MS ?? "35000", 10);
+const disableRateLimit = process.env.DISABLE_RATE_LIMIT === "1";
 const ipHashSecret =
   process.env.IP_HASH_SECRET && process.env.IP_HASH_SECRET.length >= 32
     ? process.env.IP_HASH_SECRET
@@ -118,6 +121,16 @@ const roomLogMeta = (room: RoomState) => ({
   pendingMessages: room.pendingMessages.size
 });
 
+const legacyRoomPeers = (room: RoomState) =>
+  [...room.clients.values()]
+    .filter((client): client is ClientState & { clientId: string; publicKey: string } =>
+      typeof client.clientId === "string" && typeof client.publicKey === "string"
+    )
+    .map((client) => ({
+      clientId: client.clientId,
+      publicKey: client.publicKey
+    }));
+
 const send = (client: ClientState, event: ServerEvent) => {
   if (client.ws.readyState !== WebSocket.OPEN) return;
   client.ws.send(JSON.stringify(event));
@@ -150,25 +163,29 @@ const isSafeToken = (value: unknown, min: number, max: number) =>
 const isRoomHash = (value: unknown) =>
   typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
 
+const isLegacyPublicKey = (value: unknown) => value === undefined || isSafeToken(value, 40, 256);
+
 const isBurnAfter = (value: unknown): value is BurnAfterMs =>
   value === 5000 || value === 10000 || value === 30000 || value === 60000;
 
-const isCipherMessage = (value: unknown): value is CipherMessage => {
+const isClientCipherMessage = (value: unknown): value is ClientCipherMessage => {
   if (!isRecord(value)) return false;
-  return (
-    isRoomHash(value.roomIdHash) &&
+  const hasValidBase =
     isSafeToken(value.messageId, 12, 96) &&
     isSafeToken(value.senderClientId, 12, 96) &&
     isSafeToken(value.iv, 12, 64) &&
-    isSafeToken(value.aad, 16, 512) &&
     typeof value.ciphertext === "string" &&
     value.ciphertext.length > 0 &&
     value.ciphertext.length <= 32_768 &&
     /^[A-Za-z0-9_-]+$/.test(value.ciphertext) &&
     isBurnAfter(value.burnAfterMs) &&
     typeof value.createdAt === "number" &&
-    Number.isFinite(value.createdAt)
-  );
+    Number.isFinite(value.createdAt);
+
+  if (!hasValidBase) return false;
+  if (value.roomIdHash === undefined && value.aad === undefined) return true;
+
+  return isRoomHash(value.roomIdHash) && isSafeToken(value.aad, 16, 512);
 };
 
 const createRoom = (roomIdHash: string, now = Date.now()): RoomState => ({
@@ -199,6 +216,33 @@ const toHistoryMessage = (message: PendingEncryptedMessage): HistoryMessage => (
   ...(typeof message.burnAt === "number" ? { burnAt: message.burnAt } : {})
 });
 
+const burnStoredMessage = (
+  room: RoomState,
+  messageId: string,
+  burnedAt: number,
+  serverTime: number,
+  clientId: string | undefined,
+  result: "deleted" | "timer"
+) => {
+  room.pendingMessages.delete(messageId);
+  room.burnedMessageIds.set(messageId, serverTime + burnedIdTtlMs);
+  room.updatedAt = serverTime;
+
+  broadcast(room, {
+    type: "message:burn",
+    messageId,
+    burnedAt,
+    serverTime
+  });
+
+  logWs("message:burn", {
+    roomIdHash: room.roomIdHash,
+    clientId,
+    messageId,
+    result
+  });
+};
+
 const pruneRoomMessages = (room: RoomState, now = Date.now()) => {
   for (const [messageId, expiresAt] of room.burnedMessageIds.entries()) {
     if (expiresAt <= now) room.burnedMessageIds.delete(messageId);
@@ -211,8 +255,7 @@ const pruneRoomMessages = (room: RoomState, now = Date.now()) => {
     }
 
     if (message.state === "burning" && typeof message.burnAt === "number" && message.burnAt <= now) {
-      room.pendingMessages.delete(messageId);
-      room.burnedMessageIds.set(messageId, now + burnedIdTtlMs);
+      burnStoredMessage(room, messageId, message.burnAt, now, undefined, "timer");
     }
   }
 };
@@ -285,6 +328,7 @@ const detachClientFromRoom = (client: ClientState, reason: string) => {
 
   const room = rooms.get(roomIdHash);
   delete client.roomIdHash;
+  delete client.publicKey;
   if (!room) return;
 
   room.clients.delete(clientId);
@@ -339,7 +383,7 @@ const getJoinedRoom = (client: ClientState, roomIdHash: string, clientId: string
 };
 
 const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "room:join" }>) => {
-  if (!isRoomHash(event.roomIdHash) || !isSafeToken(event.clientId, 12, 96)) {
+  if (!isRoomHash(event.roomIdHash) || !isSafeToken(event.clientId, 12, 96) || !isLegacyPublicKey(event.publicKey)) {
     send(client, { type: "room:unavailable" });
     logWs("room:join", {
       roomIdHash: typeof event.roomIdHash === "string" ? event.roomIdHash : undefined,
@@ -350,7 +394,7 @@ const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "ro
     return;
   }
 
-  const risk = checkJoin(client.ipRiskHash, event.roomIdHash);
+  const risk = disableRateLimit ? { allowed: true as const } : checkJoin(client.ipRiskHash, event.roomIdHash);
   if (!risk.allowed) {
     sendError(client, frequentMessage);
     logWs("room:join", {
@@ -395,6 +439,10 @@ const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "ro
   rooms.set(event.roomIdHash, room);
 
   client.clientId = event.clientId;
+  delete client.publicKey;
+  if (event.publicKey) {
+    client.publicKey = event.publicKey;
+  }
   client.roomIdHash = event.roomIdHash;
   client.joinedAt = now;
   client.lastSeenAt = now;
@@ -426,8 +474,14 @@ const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "ro
   room.status = "active";
   room.hadPeer = true;
   delete room.suspendedAt;
+  const legacyPeers = legacyRoomPeers(room);
+  const activeEvent: ServerEvent = {
+    type: "room:active",
+    serverTime: now,
+    ...(legacyPeers.length > 0 ? { peers: legacyPeers } : {})
+  };
   for (const peer of room.clients.values()) {
-    send(peer, { type: "room:active", serverTime: now });
+    send(peer, activeEvent);
     if (peer.clientId !== event.clientId) {
       send(peer, { type: "peer:reconnected", serverTime: now });
     }
@@ -468,8 +522,8 @@ const handleSend = (client: ClientState, event: Extract<ClientEvent, { type: "me
   if (
     !isRoomHash(event.roomIdHash) ||
     !isSafeToken(event.clientId, 12, 96) ||
-    !isCipherMessage(event.message) ||
-    event.message.roomIdHash !== event.roomIdHash ||
+    !isClientCipherMessage(event.message) ||
+    ("roomIdHash" in event.message && event.message.roomIdHash !== event.roomIdHash) ||
     event.message.senderClientId !== event.clientId
   ) {
     const messageId = isRecord(event.message) && typeof event.message.messageId === "string" ? event.message.messageId : undefined;
@@ -487,7 +541,7 @@ const handleSend = (client: ClientState, event: Extract<ClientEvent, { type: "me
     return;
   }
 
-  const risk = checkSend(client.ipRiskHash);
+  const risk = disableRateLimit ? { allowed: true as const } : checkSend(client.ipRiskHash);
   if (!risk.allowed) {
     send(client, { type: "message:failed", messageId: event.message.messageId, reason: "rate_limited" });
     sendError(client, frequentMessage);
@@ -515,31 +569,36 @@ const handleSend = (client: ClientState, event: Extract<ClientEvent, { type: "me
   }
 
   const now = Date.now();
-  const pending: PendingEncryptedMessage = {
+  const message: CipherMessage = {
     ...event.message,
+    roomIdHash: event.roomIdHash,
+    aad: "aad" in event.message ? event.message.aad : ""
+  };
+  const pending: PendingEncryptedMessage = {
+    ...message,
     expireAt: Math.min(now + messageTtlMs, room.expireAt),
     state: "stored"
   };
-  room.pendingMessages.set(event.message.messageId, pending);
+  room.pendingMessages.set(message.messageId, pending);
   room.updatedAt = now;
 
   send(client, {
     type: "message:server_ack",
-    messageId: event.message.messageId,
+    messageId: message.messageId,
     state: "stored",
     serverTime: now
   });
 
   for (const peer of room.clients.values()) {
     if (peer.clientId !== event.clientId) {
-      send(peer, { type: "message:receive", message: event.message, state: pending.state, serverTime: now });
+      send(peer, { type: "message:receive", message, state: pending.state, serverTime: now });
     }
   }
 
   logWs("message:send", {
     roomIdHash: event.roomIdHash,
     clientId: event.clientId,
-    messageId: event.message.messageId,
+    messageId: message.messageId,
     result: room.clients.size > 1 ? "forwarded" : "stored",
     state: pending.state,
     ...roomLogMeta(room)
@@ -591,8 +650,20 @@ const handleMessageProgress = (
 };
 
 const handleSeen = (client: ClientState, event: Extract<ClientEvent, { type: "message:seen" }>) => {
-  if (!isRoomHash(event.roomIdHash) || !isSafeToken(event.clientId, 12, 96) || !isSafeToken(event.messageId, 12, 96)) {
+  if (
+    !isRoomHash(event.roomIdHash) ||
+    !isSafeToken(event.clientId, 12, 96) ||
+    !isSafeToken(event.messageId, 12, 96) ||
+    event.confirm !== "user-click"
+  ) {
     sendError(client);
+    logWs("message:seen", {
+      roomIdHash: typeof event.roomIdHash === "string" ? event.roomIdHash : undefined,
+      clientId: typeof event.clientId === "string" ? event.clientId : undefined,
+      messageId: typeof event.messageId === "string" ? event.messageId : undefined,
+      errorType: "invalid",
+      result: "rejected"
+    });
     return;
   }
 
@@ -614,18 +685,19 @@ const handleSeen = (client: ClientState, event: Extract<ClientEvent, { type: "me
     return;
   }
 
-  const seenAt = Number.isFinite(event.seenAt) ? event.seenAt : Date.now();
+  const seenAt = Date.now();
   message.state = "burning";
   message.seenAt = seenAt;
   message.burnAt = seenAt + message.burnAfterMs;
-  room.updatedAt = Date.now();
+  room.updatedAt = seenAt;
 
   broadcast(room, {
     type: "message:seen",
     messageId: event.messageId,
     seenBy: event.clientId,
     seenAt,
-    burnAt: message.burnAt
+    burnAt: message.burnAt,
+    serverTime: seenAt
   });
 
   logWs("message:seen", {
@@ -635,6 +707,15 @@ const handleSeen = (client: ClientState, event: Extract<ClientEvent, { type: "me
     result: "broadcast",
     state: message.state
   });
+
+  const burnAt = message.burnAt;
+  const burnTimer = setTimeout(() => {
+    const currentRoom = rooms.get(event.roomIdHash);
+    const currentMessage = currentRoom?.pendingMessages.get(event.messageId);
+    if (!currentRoom || !currentMessage || currentMessage.state !== "burning" || currentMessage.burnAt !== burnAt) return;
+    burnStoredMessage(currentRoom, event.messageId, burnAt, Date.now(), event.clientId, "timer");
+  }, Math.max(0, burnAt - Date.now()));
+  burnTimer.unref();
 };
 
 const handleBurn = (client: ClientState, event: Extract<ClientEvent, { type: "message:burn" }>) => {
@@ -645,24 +726,21 @@ const handleBurn = (client: ClientState, event: Extract<ClientEvent, { type: "me
 
   const room = getJoinedRoom(client, event.roomIdHash, event.clientId);
   if (!room) return;
-
+  const message = room.pendingMessages.get(event.messageId);
   const now = Date.now();
-  room.pendingMessages.delete(event.messageId);
-  room.burnedMessageIds.set(event.messageId, now + burnedIdTtlMs);
-  room.updatedAt = now;
 
-  broadcast(room, {
-    type: "message:burn",
-    messageId: event.messageId,
-    burnedAt: Number.isFinite(event.burnedAt) ? event.burnedAt : now
-  });
+  if (!message || message.state !== "burning" || typeof message.burnAt !== "number" || message.burnAt > now) {
+    logWs("message:burn", {
+      roomIdHash: event.roomIdHash,
+      clientId: event.clientId,
+      messageId: event.messageId,
+      result: "ignored",
+      state: message?.state
+    });
+    return;
+  }
 
-  logWs("message:burn", {
-    roomIdHash: event.roomIdHash,
-    clientId: event.clientId,
-    messageId: event.messageId,
-    result: "deleted"
-  });
+  burnStoredMessage(room, event.messageId, message.burnAt, now, event.clientId, "deleted");
 };
 
 const handleDestroy = (client: ClientState, event: Extract<ClientEvent, { type: "room:destroy" }>) => {

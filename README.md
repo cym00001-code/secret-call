@@ -165,7 +165,7 @@ ipRiskHash = HMAC-SHA256(IP_HASH_SECRET, ip + yyyy-mm-dd)
 
 ## 云服务器部署
 
-生产环境必须使用 HTTPS/WSS。不要用纯 HTTP/WS 暴露公网服务。
+生产环境必须使用 HTTPS/WSS。不要用纯 HTTP/WS 暴露公网服务。浏览器在公网 HTTP 下通常不会开放 Web Crypto，用户会无法进入房间。
 
 建议目录：
 
@@ -196,6 +196,14 @@ Nginx：
 3. `/` 代理到 `127.0.0.1:3100`。
 4. `/ws` 代理到 `127.0.0.1:3101/ws`，必须保留 `Upgrade` 和 `Connection` 头。
 5. 将 HTTP 自动跳转到 HTTPS。
+
+当前云服务器临时部署使用 IP 自签名证书：
+
+- HTTPS: `https://8.138.150.200`
+- WSS: `wss://8.138.150.200/ws`
+- 旧 HTTP 入口 `http://8.138.150.200:39085` 会跳转到 HTTPS
+
+自签名证书会出现浏览器安全警告，需要手动继续访问。正式上线应绑定已备案域名并配置可信 CA 证书。
 
 宝塔 Nginx 常见重载命令：
 

@@ -263,7 +263,14 @@ function ChatRoom({ room }: { room: RoomController }) {
           {room.messages.length === 0 ? (
             <EmptyConversation roomState={room.roomState} />
           ) : (
-            room.messages.map((message) => <MessageBubble key={message.id} message={message} now={room.now} />)
+            room.messages.map((message) => (
+              <MessageBubble
+                key={message.id}
+                message={message}
+                now={room.now}
+                onConfirmSeen={room.confirmPeerMessageSeen}
+              />
+            ))
           )}
           <div ref={messagesEndRef} />
         </div>
@@ -300,7 +307,7 @@ function ChatRoom({ room }: { room: RoomController }) {
             </button>
           </form>
           <p className="mt-2 text-xs text-mute">
-            对方真正看见后才开始倒计时，当前 {room.selectedBurnTime / 1000} 秒。
+            对方点击收到的消息后才开始倒计时，当前 {room.selectedBurnTime / 1000} 秒。
           </p>
           <p className="mt-1 text-xs text-danger/70">无法阻止屏幕截图或拍照，请在可信环境中使用。</p>
         </div>
@@ -400,33 +407,58 @@ function BurnTimeSelector({
   );
 }
 
-function MessageBubble({ message, now }: { message: LocalMessage; now: number }) {
+function MessageBubble({
+  message,
+  now,
+  onConfirmSeen
+}: {
+  message: LocalMessage;
+  now: number;
+  onConfirmSeen: (messageId: string) => boolean;
+}) {
   const isMe = message.from === "me";
+  const canConfirmSeen =
+    !isMe &&
+    Boolean(message.decryptedText) &&
+    !message.displayText &&
+    ["delivered", "decrypted", "visible"].includes(message.status);
+  const visibleText =
+    message.displayText ??
+    (message.status === "undecryptable" ? "无法解密" : isMe ? "消息处理中" : "加密消息，点击查看");
   const timeLeft =
     message.status === "burning" && message.burnAt ? Math.max(0, message.burnAt - now) : undefined;
   const progress = timeLeft === undefined ? 0 : Math.max(0, Math.min(100, (timeLeft / message.burnAfterMs) * 100));
 
   return (
     <div className={`flex ${isMe ? "justify-end" : "justify-start"}`}>
-      <div
+      <button
+        type="button"
+        onClick={() => {
+          if (canConfirmSeen) onConfirmSeen(message.id);
+        }}
+        disabled={!canConfirmSeen}
+        data-testid="message-bubble"
         className={`max-w-[85%] border-l-2 bg-message px-4 py-3 sm:max-w-[80%] ${
           isMe ? "border-brand" : "border-line"
-        }`}
+        } ${canConfirmSeen ? "cursor-pointer text-left transition-colors hover:border-brand/70 hover:bg-panel focus:outline-none focus:ring-1 focus:ring-brand/60" : "cursor-default text-left"}`}
+        aria-label={canConfirmSeen ? "确认查看消息并启动焚毁倒计时" : undefined}
       >
         <p className={`mb-1.5 text-xs font-semibold uppercase tracking-[2px] ${isMe ? "text-brand" : "text-dim"}`}>
           {isMe ? "你" : "对方"}
         </p>
-        <p className="break-words text-sm leading-relaxed text-bright">{message.text ?? "无法解密"}</p>
+        <p className="break-words text-sm leading-relaxed text-bright">{visibleText}</p>
         <MessageStatusLine message={message} {...(timeLeft !== undefined ? { timeLeft } : {})} />
         {message.status === "burning" && timeLeft !== undefined ? (
           <div className="mt-3 flex items-center gap-2">
             <div className="h-0.5 flex-1 overflow-hidden bg-line">
               <div className="h-full bg-danger transition-all" style={{ width: `${progress}%` }} />
             </div>
-            <span className="min-w-10 text-right text-xs tabular-nums text-danger">{(timeLeft / 1000).toFixed(1)}s</span>
+            <span className="min-w-10 text-right text-xs tabular-nums text-danger" data-testid="burn-countdown">
+              {(timeLeft / 1000).toFixed(1)}s
+            </span>
           </div>
         ) : null}
-      </div>
+      </button>
     </div>
   );
 }
@@ -449,7 +481,7 @@ function messageStatusText(message: LocalMessage, timeLeft?: number) {
   if (message.status === "stored") return message.from === "me" ? "已暂存，等待对方查看" : "已暂存";
   if (message.status === "delivered") return message.from === "me" ? "已送达" : "已收到";
   if (message.status === "decrypted" || message.status === "visible") {
-    return message.from === "me" ? "等待对方查看" : "已解密，等待同步";
+    return message.from === "me" ? "等待对方点击查看" : "点击确认查看并启动倒计时";
   }
   if (message.status === "seen") return "对方已查看";
   if (message.status === "burning" && timeLeft !== undefined) {
@@ -472,7 +504,7 @@ function HiddenOverlay({ onReveal }: { onReveal: () => void }) {
           </div>
         </div>
         <h3 className="mb-2 text-lg font-bold uppercase tracking-[2px] text-bright">窗口已隐藏</h3>
-        <p className="mb-8 text-xs text-dim">聊天内容已被遮罩。隐藏期间不会发送已看见回执。</p>
+        <p className="mb-8 text-xs text-dim">聊天内容已被遮罩。隐藏期间不会发送查看确认，也不会启动焚毁倒计时。</p>
         <button
           onClick={onReveal}
           className="inline-flex items-center gap-2 bg-brand px-6 py-3 text-sm font-bold uppercase tracking-[2px] text-ink transition-colors hover:bg-[#00a88f]"

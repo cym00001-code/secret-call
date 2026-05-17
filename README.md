@@ -86,8 +86,8 @@ V2 不再因为一方离开就销毁房间。
 - `stored`：服务端已暂存密文。
 - `delivered`：对方客户端已收到密文。
 - `decrypted`：对方客户端已成功解密。
-- `visible`：对方页面可见且消息已渲染。
-- `seen`：对方确认看见。
+- `visible`：对方点击收到的消息后，客户端确认这条消息可被查看。
+- `seen`：对方主动点击确认查看。
 - `burning`：焚毁倒计时中。
 - `burned`：已焚毁。
 - `failed`：发送失败。
@@ -102,7 +102,7 @@ V2 不再因为一方离开就销毁房间。
 4. 如果 B 离线，消息保持 pending，不触发 seen，不触发倒计时。
 5. B 收到密文后发送 `message:delivered`。
 6. B 解密成功后发送 `message:decrypted`。
-7. B 只有在消息已渲染、页面可见、没有隐藏窗口遮罩、房间为 `active` 且 WebSocket 有效时，才发送 `message:visible` 和 `message:seen`。
+7. B 只有主动点击收到的消息，且页面可见、没有隐藏窗口遮罩、房间为 `active`、WebSocket 有效时，才发送 `message:visible` 和 `message:seen`。
 8. 双方收到 `message:seen` 后开始倒计时。
 9. 倒计时结束后客户端发送 `message:burn`。
 10. 服务端广播 `message:burn`，并从 `pendingMessages` 删除消息。
@@ -199,7 +199,7 @@ pnpm dev:web
 7. 在线方发送消息，状态应显示“对方离线，等待其重新进入”或“已暂存”。
 8. 离线方重新输入相同房间号和口令，应恢复未焚毁密文并解密。
 9. 页面切到后台或点击“隐藏窗口”时，不应触发已看见回执。
-10. 页面重新可见后，已渲染的对方消息才会触发焚毁倒计时。
+10. 页面重新可见后，已渲染的对方消息仍不自动触发焚毁倒计时，必须由接收方点击该消息。
 11. 倒计时结束后双方删除消息，重进后不再恢复。
 12. 点击“销毁房间”，输入“销毁”二次确认后，房间不可恢复。
 
@@ -212,7 +212,7 @@ pnpm build
 pnpm test:e2e
 ```
 
-`pnpm test:e2e` 会启动本地 web/server，并用真实 Chromium 浏览器覆盖双人加入、第三人模糊拒绝、刷新恢复未焚毁密文、隐藏窗口不触发 seen。
+`pnpm test:e2e` 会启动本地 web/server，并用真实 Chromium 浏览器覆盖双人加入、第三人模糊拒绝、刷新恢复未焚毁密文、接收方点击消息后才触发 seen。
 
 ## 环境变量
 
@@ -261,6 +261,7 @@ Nginx：
 2. `/ws` 代理到 `127.0.0.1:3101/ws`。
 3. `/ws` 必须保留 `Upgrade` 和 `Connection` 头。
 4. HTTP 自动跳转 HTTPS。
+5. 对 `/` 和 `/ws` 显式关闭 `proxy_cache`，避免部署后浏览器拿到旧的 Next.js chunk。
 
 当前云服务器已使用 Let's Encrypt 可信 IP 地址证书：
 

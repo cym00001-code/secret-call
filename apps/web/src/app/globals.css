@@ -1,0 +1,69 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color-scheme: dark;
+  background: #050505;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+  background: #050505;
+  color: #e0e0e0;
+  font-family: ui-monospace, "JetBrains Mono", "Cascadia Code", "Source Code Pro",
+    Menlo, Consolas, monospace;
+  overflow-x: hidden;
+  -webkit-tap-highlight-color: transparent;
+}
+
+body {
+  min-height: 100dvh;
+}
+
+button,
+input {
+  font: inherit;
+}
+
+button {
+  letter-spacing: 0;
+}
+
+.scrollbar-hide {
+  -ms-overflow-style: none;
+  scrollbar-width: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+.secure-field {
+  background:
+    linear-gradient(90deg, rgba(0, 143, 122, 0.05) 1px, transparent 1px),
+    linear-gradient(180deg, rgba(0, 143, 122, 0.035) 1px, transparent 1px);
+  background-size: 42px 42px;
+}
+
+.signal-sweep {
+  background:
+    linear-gradient(90deg, transparent, rgba(0, 143, 122, 0.18), transparent),
+    linear-gradient(180deg, transparent, rgba(0, 143, 122, 0.05), transparent);
+  animation: sweep 8s linear infinite;
+}
+
+@keyframes sweep {
+  0% {
+    transform: translateX(-45%) skewX(-10deg);
+  }
+  100% {
+    transform: translateX(145%) skewX(-10deg);
+  }
+}

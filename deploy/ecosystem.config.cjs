@@ -14,7 +14,7 @@ module.exports = {
     {
       name: "secret-room-web",
       cwd: "/www/wwwroot/secret-room/apps/web",
-      script: "../../node_modules/next/dist/bin/next",
+      script: "node_modules/next/dist/bin/next",
       args: "start --port 3100 --hostname 127.0.0.1",
       interpreter: "node",
       env: {

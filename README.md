@@ -1,78 +1,207 @@
 # secret-room
 
-无账号双人密聊网站 MVP。两个人输入相同的房间号和房间口令后，才能唤醒同一个临时房间。房间最多两人，服务端只负责匹配房间和转发密文。
+无账号双人密聊网站 MVP V2。两个人输入相同房间号和房间口令后，会进入同一个临时房间。服务端不接触明文，不保存口令和密钥，只短期保存未焚毁的密文与必要状态，用于断线、刷新、重新进入后的恢复。
 
-## 功能
+## 技术栈
 
-- 无注册、无登录、无昵称、无头像、无好友关系
-- 双人临时房间，第三人只能看到模糊提示
-- 浏览器端 ECDH + HKDF + AES-GCM 端到端加密
-- 服务端不接触口令、psk、sessionKey、ECDH privateKey 和明文消息
-- 每条消息独立随机 IV，AAD 使用固定字段顺序的稳定二进制编码
-- 阅后即焚基于 `message:seen` 事件触发，默认 30 秒，可选 5/10/30/60 秒
-- 页面失焦自动模糊聊天内容，支持手动隐藏窗口
-- IP 仅用于内存风控，不展示给用户，不写入永久数据库
+- Frontend: Next.js + TypeScript + Tailwind CSS
+- Backend: Node.js + Fastify
+- Realtime: `ws` WebSocket
+- Crypto: Web Crypto API
+- Storage: 内存 `Map`
+- Rate Limit: IP HMAC 哈希 + 内存滑动窗口
+- Deploy: Nginx + PM2
 
-## 项目结构
+## V2 变化
+
+V1 使用临时 ECDH 会话密钥，刷新后无法恢复会话。V2 改为浏览器端根据房间号和口令派生长期 `roomMessageKey`：
+
+- 用户刷新或关闭页面后，本地内存密钥和明文自然丢失。
+- 用户重新输入相同房间号和口令后，会重新派生同一个 `roomMessageKey`。
+- 服务端返回尚未焚毁、未过期的密文历史。
+- 浏览器用重新派生的 `roomMessageKey` 解密恢复。
+- 手动销毁、TTL 过期、服务端重启后不可恢复。
+
+## 安全边界
+
+- 服务端不保存明文。
+- 服务端不保存原始房间号、原始口令、`roomMessageKey`、`baseKey`、`psk/sessionKey/privateKey`。
+- 服务端短期保存密文、IV、AAD、消息 ID、发送方临时 clientId、焚毁时间和投递状态。
+- `roomIdHash` 只用于房间匹配。
+- 明文和密钥只存在浏览器内存中，不写入 `localStorage`、`sessionStorage`、IndexedDB 或 cookie。
+- IP 只用于风控，不展示给用户，不返回前端，不和聊天内容绑定持久保存。
+- 弱口令存在被离线猜测的风险。请使用较长、随机、不容易猜的口令。
+- 本项目不适合高强度对抗场景。
+- 无法阻止截图或拍屏。
+- 服务端重启会丢失内存房间，这是 MVP 限制。
+- 手动销毁后无法恢复。
+- 已焚毁消息不恢复。
+
+## 加密方案
+
+浏览器端派生：
+
+1. `normalizedRoomNumber = roomNumber.trim().normalize("NFKC")`
+2. `normalizedPassphrase = passphrase.trim().normalize("NFKC")`
+3. `inputMaterial = normalizedRoomNumber + ":" + normalizedPassphrase`
+4. `baseBits = PBKDF2(inputMaterial, salt = "secret-room-v2:" + normalizedRoomNumber, SHA-256, 250000 iterations)`
+5. `roomIdHash = SHA-256("room-id:v2" + derived room id material)`
+6. `roomMessageKey = AES-GCM key derived from baseBits with purpose "message-key:v2"`
+7. `securityCode = short fingerprint(roomMessageKey fingerprint + roomIdHash)`
+
+每条消息：
+
+- AES-GCM 加密。
+- 每条消息使用独立随机 96-bit IV。
+- AAD 使用固定字段顺序的稳定二进制序列化，不使用普通对象 `JSON.stringify`。
+- AAD 字段：`version`、`roomIdHash`、`messageId`、`senderClientId`、`burnAfterMs`、`createdAt`。
+
+稳定序列化格式：每个字段为 UTF-8 编码，并写入 `uint32be length + bytes`。
+
+## 房间生命周期
+
+- `waiting`：第一个人进入，等待另一端。
+- `active`：双方在线。
+- `peer_offline`：一方离开，另一方仍在线，房间和未焚毁密文保留。
+- `suspended`：双方都离线，房间短期保留。
+- `destroyed`：任意一方二次确认销毁后，服务端立即删除房间、clients、pending 密文、状态和 burned id。
+- `expired`：TTL 到期后服务端清理。
+
+V2 不再因为一方离开就销毁房间。
+
+默认 TTL：
+
+- 房间最大存活时间：24 小时。
+- 双方都离线后保留：2 小时。
+- 未焚毁密文最多保留：2 小时。
+- 已焚毁消息立即从 pending 中删除。
+- burned message id 短期保留：2 小时，用于避免重复恢复。
+
+## 消息状态机
+
+客户端消息状态：
+
+- `sending`：正在发送。
+- `server_ack`：服务端已收到。
+- `stored`：服务端已暂存密文。
+- `delivered`：对方客户端已收到密文。
+- `decrypted`：对方客户端已成功解密。
+- `visible`：对方页面可见且消息已渲染。
+- `seen`：对方确认看见。
+- `burning`：焚毁倒计时中。
+- `burned`：已焚毁。
+- `failed`：发送失败。
+- `peer_offline`：对方离线，等待其重新进入。
+- `undecryptable`：无法解密。
+
+## 阅后即焚
+
+1. A 发送密文消息。
+2. 服务端返回 `message:server_ack`，并把密文保存到 `pendingMessages`。
+3. 如果 B 在线，服务端转发 `message:receive`。
+4. 如果 B 离线，消息保持 pending，不触发 seen，不触发倒计时。
+5. B 收到密文后发送 `message:delivered`。
+6. B 解密成功后发送 `message:decrypted`。
+7. B 只有在消息已渲染、页面可见、没有隐藏窗口遮罩、房间为 `active` 且 WebSocket 有效时，才发送 `message:visible` 和 `message:seen`。
+8. 双方收到 `message:seen` 后开始倒计时。
+9. 倒计时结束后客户端发送 `message:burn`。
+10. 服务端广播 `message:burn`，并从 `pendingMessages` 删除消息。
+
+## WebSocket 事件
+
+客户端发送：
+
+- `room:join`
+- `room:leave`
+- `room:destroy`
+- `room:sync`
+- `message:send`
+- `message:delivered`
+- `message:decrypted`
+- `message:visible`
+- `message:seen`
+- `message:burn`
+- `ping`
+
+服务端发送：
+
+- `room:waiting`
+- `room:active`
+- `room:peer_offline`
+- `room:suspended`
+- `room:resumed`
+- `room:destroyed`
+- `room:expired`
+- `room:unavailable`
+- `room:sync`
+- `message:server_ack`
+- `message:receive`
+- `message:history`
+- `message:delivered`
+- `message:decrypted`
+- `message:visible`
+- `message:seen`
+- `message:burn`
+- `message:failed`
+- `peer:left`
+- `peer:reconnected`
+- `error`
+- `pong`
+
+`message:history` 只包含未焚毁、未过期的密文消息，不包含明文、口令、密钥、IP 或设备信息。
+
+## IP 风控
+
+服务端使用：
 
 ```text
-secret-room/
-  apps/
-    web/       Next.js + TypeScript + Tailwind CSS
-    server/    Node.js + Fastify + ws
-  deploy/
-    ecosystem.config.cjs
-    nginx.secret-room.example.conf
-  package.json
-  pnpm-workspace.yaml
-  .env.example
-  README.md
+ipRiskHash = HMAC-SHA256(IP_HASH_SECRET, ip + yyyy-mm-dd)
 ```
 
-## 本地安装
+限制：
+
+- 同一 `ipRiskHash` 每分钟最多尝试进入 20 次房间。
+- 同一 `ipRiskHash` 每分钟最多发送 60 条消息。
+- 同一 `ipRiskHash` 每 10 秒最多尝试唤醒 5 个不同 `roomIdHash`。
+
+日志只记录事件类型、`roomIdHash/clientId/messageId` 前 8 位、状态变化、错误类型和风控结果。禁止记录完整 payload、完整密文、IV、AAD、明文、口令、密钥和完整 IP。
+
+## 本地运行
+
+在项目根目录运行：
 
 ```bash
 corepack enable
-corepack prepare pnpm@9.15.4 --activate
 pnpm install
-```
-
-如果当前 Node 环境没有 `corepack` 命令，可以使用：
-
-```bash
-npx -y pnpm@9.15.4 install
-```
-
-本地开发可以使用 HTTP/WS：
-
-```bash
 pnpm dev
 ```
 
-默认地址：
-
-- Web: <http://localhost:3100>
-- Server health: <http://localhost:3101/health>
-- WebSocket: `ws://localhost:3101/ws`
-
-也可以分开运行：
+也可以分别启动：
 
 ```bash
 pnpm dev:server
 pnpm dev:web
 ```
 
-## 本地测试两个浏览器
+默认端口：
 
-1. 打开两个浏览器窗口，访问 <http://localhost:3100>。
-2. 两边输入相同的房间号和房间口令。
-3. 第一个窗口会显示“等待另一端唤醒房间”。
-4. 第二个窗口进入后，双方进入聊天界面，并显示相同的安全码。
-5. 通过其他可信渠道核对安全码。
-6. 任意一方发送文本消息。对方成功解密后会触发 `message:seen`，双方开始倒计时。
-7. 倒计时结束后触发 `message:burn`，双方界面删除该消息。
-8. 打开第三个窗口输入相同信息，只会看到“房间暂不可用”。
-9. 切到其他窗口或隐藏浏览器，聊天内容会自动模糊。
+- Web: `http://localhost:3100`
+- Server: `ws://localhost:3101/ws`
+
+## 本地测试
+
+1. 打开两个浏览器窗口访问 `http://localhost:3100`。
+2. 输入相同房间号和口令。
+3. 第一个窗口显示“等待另一端唤醒房间”。
+4. 第二个窗口进入后双方显示“双方面在线”。
+5. 第三个窗口输入同房间号和口令，只看到“房间暂不可用”。
+6. 一方关闭页面，另一方显示“对方已离线，房间仍保留”。
+7. 在线方发送消息，状态应显示“对方离线，等待其重新进入”或“已暂存”。
+8. 离线方重新输入相同房间号和口令，应恢复未焚毁密文并解密。
+9. 页面切到后台或点击“隐藏窗口”时，不应触发已看见回执。
+10. 页面重新可见后，已渲染的对方消息才会触发焚毁倒计时。
+11. 倒计时结束后双方删除消息，重进后不再恢复。
+12. 点击“销毁房间”，输入“销毁”二次确认后，房间不可恢复。
 
 ## 检查命令
 
@@ -82,90 +211,25 @@ pnpm typecheck
 pnpm build
 ```
 
-没有全局 pnpm 时，把命令前缀换成 `npx -y pnpm@9.15.4`。
-
 ## 环境变量
 
-复制示例文件：
+复制 `.env.example` 到服务器环境，不要提交真实 secret。
 
 ```bash
-cp .env.example .env
+PORT=3101
+HOST=0.0.0.0
+IP_HASH_SECRET=replace-with-a-long-random-secret
+ROOM_TTL_MS=86400000
+ROOM_SUSPENDED_TTL_MS=7200000
+MESSAGE_TTL_MS=7200000
+BURNED_ID_TTL_MS=7200000
+CLIENT_TIMEOUT_MS=35000
+NEXT_PUBLIC_WS_URL=wss://your-domain.example/ws
 ```
-
-生产环境必须设置一个足够长的 `IP_HASH_SECRET`。不要把真实 `.env`、服务器密码、SSH 私钥、GitHub token 或任何真实凭证提交到仓库。
-
-## 加密设计
-
-浏览器根据房间号和口令派生：
-
-- `psk`: 使用 PBKDF2-SHA256 从口令和房间号派生，只存在浏览器内存
-- `roomIdHash`: 从房间号和 `psk` 派生，可发送服务端，仅用于房间匹配
-
-双方进入房间后：
-
-1. 每端生成临时 ECDH P-256 密钥对。
-2. 服务端只转发双方临时公钥。
-3. 浏览器端通过 ECDH 得到 `sharedSecret`。
-4. 使用 HKDF 生成 AES-GCM 会话密钥：
-
-```text
-ikm = ECDH sharedSecret
-salt = psk
-info = encodeFrame(["secret-room-v1", roomIdHash, sortedPublicKeyA, sortedPublicKeyB])
-```
-
-双方公钥按字符串字典序排序后参与 transcript 和安全码生成，确保两端安全码一致。
-
-每条消息：
-
-- 使用 AES-GCM
-- 使用独立随机 96-bit IV
-- AAD 使用固定字段顺序：
-
-```text
-encodeFrame(["sr-aad-v1", roomIdHash, messageId, senderClientId, burnAfterMs, createdAt])
-```
-
-`encodeFrame` 对每个字段写入 `uint32be length + utf8 bytes`，不使用普通对象随意 stringify。
-
-## WebSocket 事件
-
-已实现事件：
-
-- `room:join`
-- `room:waiting`
-- `room:active`
-- `room:unavailable`
-- `message:send`
-- `message:receive`
-- `message:seen`
-- `message:burn`
-- `peer:left`
-- `room:destroy`
-- `room:destroyed`
-- `error`
-- `ping`
-- `pong`
-
-## IP 风控
-
-服务端只在内存中使用短期风险标识：
-
-```text
-ipRiskHash = HMAC-SHA256(IP_HASH_SECRET, ip + yyyy-mm-dd)
-```
-
-限制：
-
-- 同一 `ipRiskHash` 每分钟最多尝试进入 20 次房间
-- 同一 `ipRiskHash` 每分钟最多发送 60 条消息
-- 同一 `ipRiskHash` 每 10 秒最多尝试唤醒 5 个不同 `roomIdHash`
-
-日志只允许记录事件类型、`roomIdHash` 前 8 位、`clientId` 前 8 位、错误类型和风控结果。不要记录完整 IP、完整 payload、口令、明文消息或密钥。
 
 ## 云服务器部署
 
-生产环境必须使用 HTTPS/WSS。不要用纯 HTTP/WS 暴露公网服务。浏览器在公网 HTTP 下通常不会开放 Web Crypto，用户会无法进入房间。
+生产环境必须使用 HTTPS/WSS。公网 HTTP 下浏览器通常不会开放 Web Crypto，用户会无法进入房间。
 
 建议目录：
 
@@ -173,29 +237,27 @@ ipRiskHash = HMAC-SHA256(IP_HASH_SECRET, ip + yyyy-mm-dd)
 /www/wwwroot/secret-room
 ```
 
-部署步骤示例：
+安装和构建：
 
 ```bash
-cd /www/wwwroot/secret-room
 corepack enable
-corepack prepare pnpm@9.15.4 --activate
 pnpm install --frozen-lockfile
 pnpm build
+```
 
-cp .env.example .env
-# 编辑 .env，设置真实 IP_HASH_SECRET
+PM2：
 
+```bash
 pm2 start deploy/ecosystem.config.cjs
 pm2 save
 ```
 
 Nginx：
 
-1. 先为你的域名签发有效 TLS 证书，例如使用 acme.sh、Certbot 或宝塔面板。
-2. 参考 `deploy/nginx.secret-room.example.conf`。
-3. `/` 代理到 `127.0.0.1:3100`。
-4. `/ws` 代理到 `127.0.0.1:3101/ws`，必须保留 `Upgrade` 和 `Connection` 头。
-5. 将 HTTP 自动跳转到 HTTPS。
+1. `/` 代理到 `127.0.0.1:3100`。
+2. `/ws` 代理到 `127.0.0.1:3101/ws`。
+3. `/ws` 必须保留 `Upgrade` 和 `Connection` 头。
+4. HTTP 自动跳转 HTTPS。
 
 当前云服务器已使用 Let's Encrypt 可信 IP 地址证书：
 
@@ -205,40 +267,21 @@ Nginx：
 
 Let's Encrypt IP 地址证书是短周期证书，有效期约 6 天。服务器已通过 Certbot 续期任务定期检查并在更新后重载 Nginx。正式上线仍建议绑定已备案域名并配置常规可信 CA 证书，方便长期运维和品牌访问。
 
-宝塔 Nginx 常见重载命令：
-
-```bash
-/www/server/nginx/sbin/nginx -t
-/www/server/nginx/sbin/nginx -s reload
-```
-
 ## Git 备份
 
-首次初始化：
-
 ```bash
-git init
-git branch -M main
-git remote add origin https://github.com/cym00001-code/secret-call.git
+git status
 git add .
-git commit -m "feat: implement secret-room mvp"
-git push -u origin main
+git commit -m "feat: stabilize secret-room v2"
+git push
 ```
 
-不要把任何 token、SSH 私钥、服务器密码、真实 `.env` 提交到仓库。
+不要提交 `.env`、GitHub token、SSH 私钥、服务器密码或任何真实凭证。
 
-## 安全边界与已知限制
+## 后续优化
 
-- MVP 不做数据库和聊天记录持久化，服务重启会清空所有房间。
-- 服务端仍可拒绝连接、丢弃消息、延迟消息或替换临时公钥；请务必核对安全码。未核对安全码时，恶意服务端理论上可以中间人攻击。
-- 弱房间口令可能被不可信服务端离线猜测；请使用高强度口令。
-- 阅后即焚只能删除双方界面的本地消息，不能阻止截图、录屏、拍照或恶意客户端保存明文。
-- 当前 MVP 只支持文本消息，不支持图片、文件、语音、账号、好友、群聊、历史记录或管理后台。
-- 生产公网必须配置有效 TLS；仅本地开发允许 `localhost` 使用 HTTP/WS。
-
-## 下一步建议
-
-- 引入 PAKE/OPAQUE，降低弱口令离线猜测风险。
-- 加入 CSP、COOP/COEP 等更严格的浏览器安全头。
-- 增加 Playwright 端到端测试，覆盖双窗口、第三人、限流、断线和倒计时销毁。
-- 增加可观测性指标，但继续禁止记录明文、完整 payload、完整 IP 和密钥材料。
+- 引入 PAKE / OPAQUE，降低弱口令离线猜测风险。
+- 引入 Argon2id WASM，并针对移动端做耗时自适应。
+- 增加 Playwright 多窗口端到端测试。
+- 增加更细的消息重传和断线自动重连策略。
+- 在不泄露隐私的前提下增加运行指标。

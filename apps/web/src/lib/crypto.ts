@@ -9,20 +9,12 @@ import {
   toArrayBuffer
 } from "./codec";
 
-export interface RoomSecrets {
+export const PBKDF2_ITERATIONS = 250_000;
+
+export interface RoomMaterial {
   roomIdHash: string;
-  psk: ArrayBuffer;
-}
-
-export interface EcdhMaterial {
-  privateKey: CryptoKey;
-  publicKey: string;
-}
-
-export interface SessionMaterial {
-  sessionKey: CryptoKey;
+  roomMessageKey: CryptoKey;
   securityCode: string;
-  transcriptHash: string;
 }
 
 const subtle = () => {
@@ -40,117 +32,55 @@ export const randomToken = (prefix: string) => {
   return `${prefix}_${base64UrlFromBytes(bytes)}`;
 };
 
-export const deriveRoomSecrets = async (roomNumber: string, passphrase: string): Promise<RoomSecrets> => {
-  const room = normalize(roomNumber);
-  const pass = normalize(passphrase);
-  const passwordKey = await subtle().importKey("raw", toArrayBuffer(encodeUtf8(pass)), "PBKDF2", false, ["deriveBits"]);
-  const salt = encodeFrame(["secret-room-psk-v1", room]);
-  const pskBits = await subtle().deriveBits(
-    {
-      name: "PBKDF2",
-      hash: "SHA-256",
-      salt: toArrayBuffer(salt),
-      iterations: 150_000
-    },
-    passwordKey,
-    256
-  );
-  const psk = toArrayBuffer(pskBits);
-  const roomIdDigest = await subtle().digest(
-    "SHA-256",
-    toArrayBuffer(encodeFrame(["secret-room-room-hash-v1", room, base64UrlFromBytes(psk)]))
-  );
+const sha256 = (fields: Array<string | number>) => subtle().digest("SHA-256", toArrayBuffer(encodeFrame(fields)));
 
-  return {
-    roomIdHash: bytesToHex(roomIdDigest),
-    psk
-  };
-};
-
-export const generateEcdhMaterial = async (): Promise<EcdhMaterial> => {
-  const keyPair = await subtle().generateKey(
-    {
-      name: "ECDH",
-      namedCurve: "P-256"
-    },
-    false,
-    ["deriveBits"]
-  );
-  const publicKeyRaw = await subtle().exportKey("raw", keyPair.publicKey);
-
-  return {
-    privateKey: keyPair.privateKey,
-    publicKey: base64UrlFromBytes(publicKeyRaw)
-  };
-};
-
-export const deriveSessionMaterial = async (
-  privateKey: CryptoKey,
-  psk: ArrayBuffer,
-  roomIdHash: string,
-  localPublicKey: string,
-  peerPublicKey: string
-): Promise<SessionMaterial> => {
-  const peerRaw = bytesFromBase64Url(peerPublicKey);
-  const importedPeer = await subtle().importKey(
-    "raw",
-    toArrayBuffer(peerRaw),
-    {
-      name: "ECDH",
-      namedCurve: "P-256"
-    },
-    false,
-    []
-  );
-  const sharedSecret = await subtle().deriveBits(
-    {
-      name: "ECDH",
-      public: importedPeer
-    },
-    privateKey,
-    256
-  );
-  const sortedPublicKeys = [localPublicKey, peerPublicKey].sort((a, b) => a.localeCompare(b));
-  const info = toArrayBuffer(
-    encodeFrame(["secret-room-v1", roomIdHash, sortedPublicKeys[0] ?? "", sortedPublicKeys[1] ?? ""])
-  );
-  const hkdfKey = await subtle().importKey("raw", sharedSecret, "HKDF", false, ["deriveKey"]);
-  const sessionKey = await subtle().deriveKey(
-    {
-      name: "HKDF",
-      hash: "SHA-256",
-      salt: psk,
-      info
-    },
-    hkdfKey,
-    {
-      name: "AES-GCM",
-      length: 256
-    },
-    false,
-    ["encrypt", "decrypt"]
-  );
-  const transcriptHashBytes = await subtle().digest(
-    "SHA-256",
-    toArrayBuffer(
-      encodeFrame(["secret-room-transcript-v1", roomIdHash, sortedPublicKeys[0] ?? "", sortedPublicKeys[1] ?? ""])
-    )
-  );
-  const transcriptHash = bytesToHex(transcriptHashBytes);
-  const codeHashBytes = await subtle().digest(
-    "SHA-256",
-    toArrayBuffer(encodeFrame(["secret-room-code-v1", roomIdHash, transcriptHash]))
-  );
-  const securityCode = bytesToHex(codeHashBytes)
+const groupedCode = (hex: string) =>
+  hex
     .slice(0, 24)
     .toUpperCase()
     .match(/.{1,4}/gu)
     ?.join(" ") ?? "----";
 
+export const deriveRoomMaterial = async (roomNumber: string, passphrase: string): Promise<RoomMaterial> => {
+  const normalizedRoomNumber = normalize(roomNumber);
+  const normalizedPassphrase = normalize(passphrase);
+  const inputMaterial = `${normalizedRoomNumber}:${normalizedPassphrase}`;
+
+  const passwordKey = await subtle().importKey(
+    "raw",
+    toArrayBuffer(encodeUtf8(inputMaterial)),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+  const baseBits = await subtle().deriveBits(
+    {
+      name: "PBKDF2",
+      hash: "SHA-256",
+      salt: toArrayBuffer(encodeUtf8(`secret-room-v2:${normalizedRoomNumber}`)),
+      iterations: PBKDF2_ITERATIONS
+    },
+    passwordKey,
+    512
+  );
+  const baseMaterialHex = bytesToHex(baseBits);
+  const roomIdMaterial = bytesToHex(await sha256(["room-id-material:v2", baseMaterialHex]));
+  const roomIdHash = bytesToHex(await sha256(["room-id:v2", roomIdMaterial]));
+  const messageKeyBytes = await sha256(["message-key:v2", baseMaterialHex]);
+  const keyFingerprint = bytesToHex(await sha256(["message-key-fingerprint:v2", bytesToHex(messageKeyBytes)]));
+  const securityCode = groupedCode(bytesToHex(await sha256(["security-code:v2", roomIdHash, keyFingerprint])));
+  const roomMessageKey = await subtle().importKey(
+    "raw",
+    toArrayBuffer(messageKeyBytes),
+    { name: "AES-GCM", length: 256 },
+    false,
+    ["encrypt", "decrypt"]
+  );
+
   return {
-    sessionKey,
-    securityCode,
-    transcriptHash
+    roomIdHash,
+    roomMessageKey,
+    securityCode
   };
 };
 
@@ -160,10 +90,10 @@ export const aadForMessage = (
   senderClientId: string,
   burnAfterMs: BurnAfterMs,
   createdAt: number
-) => toArrayBuffer(encodeFrame(["sr-aad-v1", roomIdHash, messageId, senderClientId, burnAfterMs, createdAt]));
+) => encodeFrame(["sr-aad-v2", roomIdHash, messageId, senderClientId, burnAfterMs, createdAt]);
 
 export const encryptText = async (
-  sessionKey: CryptoKey,
+  roomMessageKey: CryptoKey,
   roomIdHash: string,
   senderClientId: string,
   text: string,
@@ -173,44 +103,52 @@ export const encryptText = async (
   const createdAt = Date.now();
   const iv = new Uint8Array(12);
   globalThis.crypto.getRandomValues(iv);
+  const aad = aadForMessage(roomIdHash, messageId, senderClientId, burnAfterMs, createdAt);
   const ciphertext = await subtle().encrypt(
     {
       name: "AES-GCM",
       iv: toArrayBuffer(iv),
-      additionalData: aadForMessage(roomIdHash, messageId, senderClientId, burnAfterMs, createdAt)
+      additionalData: toArrayBuffer(aad)
     },
-    sessionKey,
+    roomMessageKey,
     toArrayBuffer(encodeUtf8(text))
   );
 
   return {
+    roomIdHash,
     messageId,
     senderClientId,
     iv: base64UrlFromBytes(iv),
     ciphertext: base64UrlFromBytes(ciphertext),
+    aad: base64UrlFromBytes(aad),
     burnAfterMs,
     createdAt
   };
 };
 
 export const decryptText = async (
-  sessionKey: CryptoKey,
+  roomMessageKey: CryptoKey,
   roomIdHash: string,
   message: CipherMessage
 ): Promise<string> => {
+  const expectedAad = aadForMessage(
+    roomIdHash,
+    message.messageId,
+    message.senderClientId,
+    message.burnAfterMs,
+    message.createdAt
+  );
+  if (message.aad !== base64UrlFromBytes(expectedAad)) {
+    throw new Error("AAD mismatch");
+  }
+
   const plaintext = await subtle().decrypt(
     {
       name: "AES-GCM",
       iv: toArrayBuffer(bytesFromBase64Url(message.iv)),
-      additionalData: aadForMessage(
-        roomIdHash,
-        message.messageId,
-        message.senderClientId,
-        message.burnAfterMs,
-        message.createdAt
-      )
+      additionalData: toArrayBuffer(expectedAad)
     },
-    sessionKey,
+    roomMessageKey,
     toArrayBuffer(bytesFromBase64Url(message.ciphertext))
   );
 

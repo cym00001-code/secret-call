@@ -1,15 +1,64 @@
+export type BurnAfterMs = 5000 | 10000 | 30000 | 60000;
+
+export type PendingMessageState =
+  | "stored"
+  | "delivered"
+  | "decrypted"
+  | "visible"
+  | "seen"
+  | "burning";
+
+export interface CipherMessage {
+  roomIdHash: string;
+  messageId: string;
+  senderClientId: string;
+  iv: string;
+  ciphertext: string;
+  aad: string;
+  burnAfterMs: BurnAfterMs;
+  createdAt: number;
+}
+
+export interface HistoryMessage extends CipherMessage {
+  expireAt: number;
+  state: PendingMessageState;
+  seenAt?: number;
+  burnAt?: number;
+}
+
 export type ClientEvent =
   | {
       type: "room:join";
       roomIdHash: string;
       clientId: string;
-      publicKey: string;
+    }
+  | {
+      type: "room:leave";
+      roomIdHash: string;
+      clientId: string;
+    }
+  | {
+      type: "room:destroy";
+      roomIdHash: string;
+      clientId: string;
+    }
+  | {
+      type: "room:sync";
+      roomIdHash: string;
+      clientId: string;
     }
   | {
       type: "message:send";
       roomIdHash: string;
       clientId: string;
       message: CipherMessage;
+    }
+  | {
+      type: "message:delivered" | "message:decrypted" | "message:visible";
+      roomIdHash: string;
+      clientId: string;
+      messageId: string;
+      at: number;
     }
   | {
       type: "message:seen";
@@ -26,40 +75,34 @@ export type ClientEvent =
       burnedAt: number;
     }
   | {
-      type: "room:destroy";
-      roomIdHash: string;
-      clientId: string;
-    }
-  | {
       type: "ping";
       clientId?: string;
       sentAt?: number;
     };
 
 export type ServerEvent =
-  | { type: "room:waiting" }
-  | {
-      type: "room:active";
-      peers: Array<{ clientId: string; publicKey: string }>;
-      serverTime: number;
-    }
+  | { type: "room:waiting"; serverTime: number }
+  | { type: "room:active"; serverTime: number }
+  | { type: "room:peer_offline"; serverTime: number }
+  | { type: "room:suspended"; serverTime: number }
+  | { type: "room:resumed"; serverTime: number }
+  | { type: "room:destroyed"; serverTime: number }
+  | { type: "room:expired"; serverTime: number }
   | { type: "room:unavailable" }
-  | { type: "message:receive"; message: CipherMessage }
-  | { type: "message:seen"; messageId: string; seenBy: string; seenAt: number }
+  | { type: "room:sync"; serverTime: number }
+  | { type: "message:server_ack"; messageId: string; state: "server_ack" | "stored"; serverTime: number }
+  | { type: "message:receive"; message: CipherMessage; state: PendingMessageState; serverTime: number }
+  | { type: "message:history"; messages: HistoryMessage[]; serverTime: number }
+  | { type: "message:delivered"; messageId: string; byClientId: string; at: number }
+  | { type: "message:decrypted"; messageId: string; byClientId: string; at: number }
+  | { type: "message:visible"; messageId: string; byClientId: string; at: number }
+  | { type: "message:seen"; messageId: string; seenBy: string; seenAt: number; burnAt: number }
   | { type: "message:burn"; messageId: string; burnedAt: number }
-  | { type: "peer:left" }
-  | { type: "room:destroyed" }
+  | { type: "message:failed"; messageId?: string; reason: "unavailable" | "invalid" | "rate_limited" }
+  | { type: "peer:left"; serverTime: number }
+  | { type: "peer:reconnected"; serverTime: number }
   | { type: "error"; message: string }
   | { type: "pong"; sentAt?: number; serverTime: number };
-
-export interface CipherMessage {
-  messageId: string;
-  senderClientId: string;
-  iv: string;
-  ciphertext: string;
-  burnAfterMs: 5000 | 10000 | 30000 | 60000;
-  createdAt: number;
-}
 
 export const isRecord = (value: unknown): value is Record<string, unknown> =>
   typeof value === "object" && value !== null;

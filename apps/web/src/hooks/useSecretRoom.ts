@@ -1,40 +1,44 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  decryptText,
-  deriveRoomSecrets,
-  deriveSessionMaterial,
-  encryptText,
-  generateEcdhMaterial,
-  randomToken
-} from "@/lib/crypto";
+import { decryptText, deriveRoomMaterial, encryptText, randomToken } from "@/lib/crypto";
 import type {
   BurnAfterMs,
+  CipherMessage,
   ClientEvent,
+  HistoryMessage,
   LocalMessage,
+  LocalMessageStatus,
   RoomState,
   ServerEvent
 } from "@/types/protocol";
 
-interface PendingMaterial {
+interface ActiveMaterial {
   roomIdHash: string;
-  psk: ArrayBuffer;
+  roomMessageKey: CryptoKey;
   clientId: string;
-  privateKey: CryptoKey;
-  publicKey: string;
-}
-
-interface ActiveMaterial extends PendingMaterial {
-  sessionKey: CryptoKey;
   securityCode: string;
-  transcriptHash: string;
 }
 
 interface JoinInput {
   roomNumber: string;
   passphrase: string;
 }
+
+const statusRank: Record<LocalMessageStatus, number> = {
+  sending: 1,
+  server_ack: 2,
+  stored: 3,
+  peer_offline: 3,
+  delivered: 4,
+  decrypted: 5,
+  visible: 6,
+  seen: 7,
+  burning: 8,
+  burned: 9,
+  failed: 99,
+  undecryptable: 99
+};
 
 const isServerEvent = (value: unknown): value is ServerEvent =>
   typeof value === "object" && value !== null && "type" in value && typeof value.type === "string";
@@ -51,6 +55,9 @@ const resolveWsUrl = () => {
   return `${protocol}//${window.location.host}/ws`;
 };
 
+const statusFromServerState = (state: HistoryMessage["state"]): LocalMessageStatus =>
+  state === "seen" ? "seen" : state;
+
 export const useSecretRoom = () => {
   const [roomState, setRoomState] = useState<RoomState>("idle");
   const [roomNumber, setRoomNumber] = useState("");
@@ -59,14 +66,33 @@ export const useSecretRoom = () => {
   const [securityCode, setSecurityCode] = useState("");
   const [statusText, setStatusText] = useState("");
   const [isBlurred, setIsBlurred] = useState(false);
+  const [isWindowHidden, setIsWindowHidden] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
   const wsRef = useRef<WebSocket | null>(null);
-  const pendingRef = useRef<PendingMaterial | null>(null);
   const activeRef = useRef<ActiveMaterial | null>(null);
   const burnTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
   const manualCloseRef = useRef(false);
   const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const roomStateRef = useRef<RoomState>("idle");
+  const isBlurredRef = useRef(false);
+  const isWindowHiddenRef = useRef(false);
+  const visibleSentRef = useRef(new Set<string>());
+  const seenSentRef = useRef(new Set<string>());
+  const deliveredSentRef = useRef(new Set<string>());
+  const decryptedSentRef = useRef(new Set<string>());
+
+  useEffect(() => {
+    roomStateRef.current = roomState;
+  }, [roomState]);
+
+  useEffect(() => {
+    isBlurredRef.current = isBlurred;
+  }, [isBlurred]);
+
+  useEffect(() => {
+    isWindowHiddenRef.current = isWindowHidden;
+  }, [isWindowHidden]);
 
   const clearBurnTimers = useCallback(() => {
     for (const timer of burnTimersRef.current.values()) {
@@ -77,23 +103,14 @@ export const useSecretRoom = () => {
 
   const wipeLocalSession = useCallback(() => {
     clearBurnTimers();
-    pendingRef.current = null;
     activeRef.current = null;
+    visibleSentRef.current.clear();
+    seenSentRef.current.clear();
+    deliveredSentRef.current.clear();
+    decryptedSentRef.current.clear();
     setMessages([]);
     setSecurityCode("");
   }, [clearBurnTimers]);
-
-  const closeSocket = useCallback(() => {
-    manualCloseRef.current = true;
-    if (heartbeatRef.current) {
-      clearInterval(heartbeatRef.current);
-      heartbeatRef.current = null;
-    }
-    if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
-      wsRef.current.close(1000, "local close");
-    }
-    wsRef.current = null;
-  }, []);
 
   const sendEvent = useCallback((event: ClientEvent) => {
     const socket = wsRef.current;
@@ -102,13 +119,38 @@ export const useSecretRoom = () => {
     return true;
   }, []);
 
+  const sendLeave = useCallback(() => {
+    const active = activeRef.current;
+    if (!active) return;
+    sendEvent({
+      type: "room:leave",
+      roomIdHash: active.roomIdHash,
+      clientId: active.clientId
+    });
+  }, [sendEvent]);
+
+  const closeSocket = useCallback(
+    (notifyLeave = true) => {
+      manualCloseRef.current = true;
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
+        heartbeatRef.current = null;
+      }
+      if (notifyLeave) sendLeave();
+      if (wsRef.current && wsRef.current.readyState === WebSocket.OPEN) {
+        wsRef.current.close(1000, "local close");
+      }
+      wsRef.current = null;
+    },
+    [sendLeave]
+  );
+
   const scheduleBurn = useCallback(
-    (messageId: string, burnAfterMs: BurnAfterMs, seenAt: number) => {
+    (messageId: string, burnAfterMs: BurnAfterMs, burnAt: number) => {
       const existing = burnTimersRef.current.get(messageId);
       if (existing) clearTimeout(existing);
 
-      const expireAt = seenAt + burnAfterMs;
-      const delay = Math.max(0, expireAt - Date.now());
+      const delay = Math.max(0, burnAt - Date.now());
       const timer = setTimeout(() => {
         const active = activeRef.current;
         if (active) {
@@ -129,22 +171,23 @@ export const useSecretRoom = () => {
     [sendEvent]
   );
 
-  const markMessageSeen = useCallback(
-    (messageId: string, seenAt: number) => {
+  const updateMessageStatus = useCallback(
+    (messageId: string, nextStatus: LocalMessageStatus, extra: Partial<LocalMessage> = {}) => {
       setMessages((current) =>
         current.map((message) => {
-          if (message.id !== messageId || message.status === "burning") return message;
-          scheduleBurn(message.id, message.burnAfterMs, seenAt);
+          if (message.id !== messageId) return message;
+          if (statusRank[message.status] > statusRank[nextStatus] && message.status !== "peer_offline") {
+            return { ...message, ...extra };
+          }
           return {
             ...message,
-            status: "burning",
-            seenAt,
-            expireAt: seenAt + message.burnAfterMs
+            ...extra,
+            status: nextStatus
           };
         })
       );
     },
-    [scheduleBurn]
+    []
   );
 
   const removeBurnedMessage = useCallback((messageId: string) => {
@@ -154,69 +197,162 @@ export const useSecretRoom = () => {
     setMessages((current) => current.filter((message) => message.id !== messageId));
   }, []);
 
-  const handleActive = useCallback(
-    async (event: Extract<ServerEvent, { type: "room:active" }>) => {
-      const pending = pendingRef.current;
-      if (!pending) return;
-      const peer = event.peers.find((item) => item.clientId !== pending.clientId);
-      if (!peer) {
-        setRoomState("waiting");
-        return;
-      }
-
-      const session = await deriveSessionMaterial(
-        pending.privateKey,
-        pending.psk,
-        pending.roomIdHash,
-        pending.publicKey,
-        peer.publicKey
-      );
-
-      activeRef.current = {
-        ...pending,
-        ...session
-      };
-      setSecurityCode(session.securityCode);
-      setStatusText("房间已唤醒");
-      setRoomState("active");
+  const sendProgress = useCallback(
+    (type: "message:delivered" | "message:decrypted" | "message:visible", messageId: string) => {
+      const active = activeRef.current;
+      if (!active) return false;
+      return sendEvent({
+        type,
+        roomIdHash: active.roomIdHash,
+        clientId: active.clientId,
+        messageId,
+        at: Date.now()
+      });
     },
-    []
+    [sendEvent]
   );
 
-  const handleReceive = useCallback(
-    async (event: Extract<ServerEvent, { type: "message:receive" }>) => {
+  const sendDelivered = useCallback(
+    (messageId: string) => {
+      if (deliveredSentRef.current.has(messageId)) return;
+      if (sendProgress("message:delivered", messageId)) {
+        deliveredSentRef.current.add(messageId);
+      }
+    },
+    [sendProgress]
+  );
+
+  const sendDecrypted = useCallback(
+    (messageId: string) => {
+      if (decryptedSentRef.current.has(messageId)) return;
+      if (sendProgress("message:decrypted", messageId)) {
+        decryptedSentRef.current.add(messageId);
+      }
+    },
+    [sendProgress]
+  );
+
+  const canSendSeen = useCallback(() => {
+    const socket = wsRef.current;
+    return (
+      roomStateRef.current === "active" &&
+      !isWindowHiddenRef.current &&
+      !isBlurredRef.current &&
+      document.visibilityState === "visible" &&
+      socket?.readyState === WebSocket.OPEN
+    );
+  }, []);
+
+  const handleEncryptedMessage = useCallback(
+    async (encrypted: CipherMessage | HistoryMessage, sourceState: HistoryMessage["state"] = "stored") => {
       const active = activeRef.current;
-      if (!active || event.message.senderClientId === active.clientId) return;
+      if (!active) return;
+      if (encrypted.roomIdHash !== active.roomIdHash) return;
+
+      const from: LocalMessage["from"] = encrypted.senderClientId === active.clientId ? "me" : "peer";
+      const existingStatus = statusFromServerState(sourceState);
+      const burnAt = "burnAt" in encrypted ? encrypted.burnAt : undefined;
+      const seenAt = "seenAt" in encrypted ? encrypted.seenAt : undefined;
+
+      if (from === "peer") {
+        sendDelivered(encrypted.messageId);
+      }
 
       try {
-        const text = await decryptText(active.sessionKey, active.roomIdHash, event.message);
+        const text = await decryptText(active.roomMessageKey, active.roomIdHash, encrypted);
+        if (from === "peer") {
+          sendDecrypted(encrypted.messageId);
+        }
+
         setMessages((current) => {
-          if (current.some((message) => message.id === event.message.messageId)) return current;
+          const already = current.some((message) => message.id === encrypted.messageId);
+          if (already) {
+            return current.map((message) =>
+              message.id === encrypted.messageId
+                ? {
+                    ...message,
+                    text,
+                    ciphertext: encrypted.ciphertext,
+                    iv: encrypted.iv,
+                    aad: encrypted.aad,
+                    status:
+                      existingStatus === "burning" || existingStatus === "seen"
+                        ? "burning"
+                        : statusRank[message.status] >= statusRank[existingStatus]
+                          ? message.status
+                          : existingStatus,
+                    ...(typeof seenAt === "number" ? { seenAt } : {}),
+                    ...(typeof burnAt === "number" ? { burnAt } : {})
+                  }
+                : message
+            );
+          }
+
           return [
             ...current,
             {
-              id: event.message.messageId,
-              from: "peer",
+              id: encrypted.messageId,
+              from,
               text,
-              burnAfterMs: event.message.burnAfterMs,
-              createdAt: event.message.createdAt,
-              status: "visible"
+              ciphertext: encrypted.ciphertext,
+              iv: encrypted.iv,
+              aad: encrypted.aad,
+              burnAfterMs: encrypted.burnAfterMs,
+              createdAt: encrypted.createdAt,
+              status:
+                existingStatus === "burning" || existingStatus === "seen"
+                  ? "burning"
+                  : from === "peer"
+                    ? "decrypted"
+                    : existingStatus,
+              ...(typeof seenAt === "number" ? { seenAt } : {}),
+              ...(typeof burnAt === "number" ? { burnAt } : {})
             }
           ];
         });
 
-        sendEvent({
-          type: "message:seen",
-          roomIdHash: active.roomIdHash,
-          clientId: active.clientId,
-          messageId: event.message.messageId,
-          seenAt: Date.now()
-        });
+        if ((existingStatus === "burning" || existingStatus === "seen") && typeof burnAt === "number") {
+          scheduleBurn(encrypted.messageId, encrypted.burnAfterMs, burnAt);
+        }
       } catch {
-        setStatusText("收到一条无法解密的消息");
+        setMessages((current) => {
+          if (current.some((message) => message.id === encrypted.messageId)) return current;
+          return [
+            ...current,
+            {
+              id: encrypted.messageId,
+              from,
+              text: "无法解密",
+              ciphertext: encrypted.ciphertext,
+              iv: encrypted.iv,
+              aad: encrypted.aad,
+              burnAfterMs: encrypted.burnAfterMs,
+              createdAt: encrypted.createdAt,
+              status: "undecryptable"
+            }
+          ];
+        });
       }
     },
-    [sendEvent]
+    [scheduleBurn, sendDecrypted, sendDelivered]
+  );
+
+  const markBurning = useCallback(
+    (messageId: string, seenAt: number, burnAt: number) => {
+      setMessages((current) =>
+        current.map((message) => {
+          if (message.id !== messageId) return message;
+          scheduleBurn(message.id, message.burnAfterMs, burnAt);
+          return {
+            ...message,
+            status: "burning",
+            seenAt,
+            burnAt
+          };
+        })
+      );
+    },
+    [scheduleBurn]
   );
 
   const handleServerEvent = useCallback(
@@ -227,31 +363,89 @@ export const useSecretRoom = () => {
           setRoomState("waiting");
           break;
         case "room:active":
-          await handleActive(event);
+          setStatusText("双方在线");
+          setRoomState("active");
+          setMessages((current) =>
+            current.map((message) =>
+              message.status === "peer_offline" ? { ...message, status: "stored" } : message
+            )
+          );
+          break;
+        case "room:peer_offline":
+          setStatusText("对方已离线，房间仍保留");
+          setRoomState("peer_offline");
+          setMessages((current) =>
+            current.map((message) =>
+              message.from === "me" && !["burning", "burned", "failed"].includes(message.status)
+                ? { ...message, status: "peer_offline" }
+                : message
+            )
+          );
+          break;
+        case "room:suspended":
+          setStatusText("房间暂时无人在线，可重新唤醒");
+          setRoomState("suspended");
+          break;
+        case "room:resumed":
+          setStatusText("房间已恢复，正在同步未焚毁密文");
+          break;
+        case "room:sync":
           break;
         case "room:unavailable":
           wipeLocalSession();
-          closeSocket();
+          closeSocket(false);
           setStatusText("房间暂不可用");
           setRoomState("unavailable");
           break;
+        case "message:server_ack":
+          updateMessageStatus(event.messageId, event.state === "server_ack" ? "server_ack" : "stored");
+          if (roomStateRef.current === "peer_offline") {
+            updateMessageStatus(event.messageId, "peer_offline");
+          }
+          break;
         case "message:receive":
-          await handleReceive(event);
+          await handleEncryptedMessage(event.message, event.state);
+          break;
+        case "message:history":
+          await Promise.all(event.messages.map((message) => handleEncryptedMessage(message, message.state)));
+          break;
+        case "message:delivered":
+          updateMessageStatus(event.messageId, "delivered");
+          break;
+        case "message:decrypted":
+          updateMessageStatus(event.messageId, "decrypted");
+          break;
+        case "message:visible":
+          updateMessageStatus(event.messageId, "visible");
           break;
         case "message:seen":
-          markMessageSeen(event.messageId, event.seenAt);
+          markBurning(event.messageId, event.seenAt, event.burnAt);
           break;
         case "message:burn":
           removeBurnedMessage(event.messageId);
           break;
+        case "message:failed":
+          if (event.messageId) updateMessageStatus(event.messageId, "failed");
+          setStatusText(event.reason === "rate_limited" ? "连接过于频繁，请稍后再试" : "发送失败");
+          break;
         case "peer:left":
-          setStatusText("会话已结束");
+          setStatusText("对方已离线，房间仍保留");
+          setRoomState("peer_offline");
+          break;
+        case "peer:reconnected":
+          setStatusText("对方已重新进入");
           break;
         case "room:destroyed":
           wipeLocalSession();
-          closeSocket();
-          setStatusText("会话已销毁");
+          closeSocket(false);
+          setStatusText("房间已销毁");
           setRoomState("destroyed");
+          break;
+        case "room:expired":
+          wipeLocalSession();
+          closeSocket(false);
+          setStatusText("房间已过期");
+          setRoomState("expired");
           break;
         case "error":
           setStatusText(event.message);
@@ -263,48 +457,52 @@ export const useSecretRoom = () => {
           break;
       }
     },
-    [closeSocket, handleActive, handleReceive, markMessageSeen, removeBurnedMessage, wipeLocalSession]
+    [
+      closeSocket,
+      handleEncryptedMessage,
+      markBurning,
+      removeBurnedMessage,
+      updateMessageStatus,
+      wipeLocalSession
+    ]
   );
 
   const joinRoom = useCallback(
     async ({ roomNumber: nextRoomNumber, passphrase }: JoinInput) => {
       const cleanRoom = nextRoomNumber.trim();
       const cleanPassphrase = passphrase.trim();
-      if (!cleanRoom || !cleanPassphrase || roomState === "joining") return;
+      if (!cleanRoom || !cleanPassphrase || roomStateRef.current === "joining") return;
 
+      closeSocket(true);
       wipeLocalSession();
-      closeSocket();
       manualCloseRef.current = false;
       setRoomNumber(cleanRoom);
       setStatusText("正在唤醒房间");
       setRoomState("joining");
+      setIsWindowHidden(false);
 
       try {
-        const [roomSecrets, ecdh] = await Promise.all([
-          deriveRoomSecrets(cleanRoom, cleanPassphrase),
-          generateEcdhMaterial()
-        ]);
+        const roomMaterial = await deriveRoomMaterial(cleanRoom, cleanPassphrase);
         const clientId = randomToken("client");
-        pendingRef.current = {
-          ...roomSecrets,
-          ...ecdh,
+        activeRef.current = {
+          ...roomMaterial,
           clientId
         };
+        setSecurityCode(roomMaterial.securityCode);
 
         const socket = new WebSocket(resolveWsUrl());
         wsRef.current = socket;
 
         socket.addEventListener("open", () => {
-          const pending = pendingRef.current;
-          if (!pending) return;
+          const active = activeRef.current;
+          if (!active) return;
           sendEvent({
             type: "room:join",
-            roomIdHash: pending.roomIdHash,
-            clientId: pending.clientId,
-            publicKey: pending.publicKey
+            roomIdHash: active.roomIdHash,
+            clientId: active.clientId
           });
           heartbeatRef.current = setInterval(() => {
-            sendEvent({ type: "ping", clientId: pending.clientId, sentAt: Date.now() });
+            sendEvent({ type: "ping", clientId: active.clientId, sentAt: Date.now() });
           }, 15_000);
         });
 
@@ -324,17 +522,17 @@ export const useSecretRoom = () => {
             clearInterval(heartbeatRef.current);
             heartbeatRef.current = null;
           }
-          if (!manualCloseRef.current && roomState !== "idle") {
-            wipeLocalSession();
-            setStatusText("连接已断开");
-            setRoomState("destroyed");
+          if (!manualCloseRef.current && !["idle", "destroyed", "expired", "unavailable"].includes(roomStateRef.current)) {
+            setStatusText("连接已断开，重新输入房间号和口令可恢复未焚毁消息");
+            setRoomState("suspended");
           }
         });
 
         socket.addEventListener("error", () => {
-          wipeLocalSession();
-          setStatusText("房间暂不可用");
-          setRoomState("unavailable");
+          setStatusText("连接异常，重新输入房间号和口令可恢复未焚毁消息");
+          if (roomStateRef.current === "joining") {
+            setRoomState("unavailable");
+          }
         });
       } catch {
         wipeLocalSession();
@@ -342,18 +540,18 @@ export const useSecretRoom = () => {
         setRoomState("unavailable");
       }
     },
-    [closeSocket, handleServerEvent, roomState, sendEvent, wipeLocalSession]
+    [closeSocket, handleServerEvent, sendEvent, wipeLocalSession]
   );
 
   const sendTextMessage = useCallback(
     async (text: string) => {
       const cleanText = text.trim();
       const active = activeRef.current;
-      if (!cleanText || !active || roomState !== "active") return false;
+      if (!cleanText || !active || !["active", "peer_offline"].includes(roomStateRef.current)) return false;
 
       try {
         const encrypted = await encryptText(
-          active.sessionKey,
+          active.roomMessageKey,
           active.roomIdHash,
           active.clientId,
           cleanText,
@@ -365,28 +563,35 @@ export const useSecretRoom = () => {
             id: encrypted.messageId,
             from: "me",
             text: cleanText,
+            ciphertext: encrypted.ciphertext,
+            iv: encrypted.iv,
+            aad: encrypted.aad,
             burnAfterMs: encrypted.burnAfterMs,
             createdAt: encrypted.createdAt,
-            status: "pending"
+            status: "sending"
           }
         ]);
-        sendEvent({
+        const sent = sendEvent({
           type: "message:send",
           roomIdHash: active.roomIdHash,
           clientId: active.clientId,
           message: encrypted
         });
+        if (!sent) {
+          updateMessageStatus(encrypted.messageId, "failed");
+          return false;
+        }
         return true;
       } catch {
         setStatusText("消息发送失败");
         return false;
       }
     },
-    [roomState, selectedBurnTime, sendEvent]
+    [selectedBurnTime, sendEvent, updateMessageStatus]
   );
 
   const destroyRoom = useCallback(() => {
-    const active = activeRef.current ?? pendingRef.current;
+    const active = activeRef.current;
     if (active) {
       sendEvent({
         type: "room:destroy",
@@ -395,27 +600,28 @@ export const useSecretRoom = () => {
       });
     }
     wipeLocalSession();
-    closeSocket();
-    setStatusText("会话已销毁");
+    closeSocket(false);
+    setStatusText("房间已销毁");
     setRoomState("destroyed");
   }, [closeSocket, sendEvent, wipeLocalSession]);
 
   const reset = useCallback(() => {
+    closeSocket(true);
     wipeLocalSession();
-    closeSocket();
     setRoomNumber("");
     setStatusText("");
     setIsBlurred(false);
+    setIsWindowHidden(false);
     setRoomState("idle");
   }, [closeSocket, wipeLocalSession]);
 
   const hideWindow = useCallback(() => {
-    if (roomState === "active") setRoomState("hidden");
-  }, [roomState]);
+    setIsWindowHidden(true);
+  }, []);
 
   const revealWindow = useCallback(() => {
-    if (roomState === "hidden") setRoomState("active");
-  }, [roomState]);
+    setIsWindowHidden(false);
+  }, []);
 
   useEffect(() => {
     const tick = setInterval(() => setNow(Date.now()), 250);
@@ -441,10 +647,48 @@ export const useSecretRoom = () => {
     };
   }, []);
 
+  useEffect(() => {
+    if (!canSendSeen()) return;
+
+    for (const message of messages) {
+      if (
+        message.from !== "peer" ||
+        !message.text ||
+        message.status === "undecryptable" ||
+        message.status === "burning" ||
+        message.status === "burned" ||
+        seenSentRef.current.has(message.id)
+      ) {
+        continue;
+      }
+
+      const active = activeRef.current;
+      if (!active) continue;
+
+      if (!visibleSentRef.current.has(message.id)) {
+        if (sendProgress("message:visible", message.id)) {
+          visibleSentRef.current.add(message.id);
+        }
+      }
+
+      if (
+        sendEvent({
+          type: "message:seen",
+          roomIdHash: active.roomIdHash,
+          clientId: active.clientId,
+          messageId: message.id,
+          seenAt: Date.now()
+        })
+      ) {
+        seenSentRef.current.add(message.id);
+      }
+    }
+  }, [canSendSeen, isBlurred, isWindowHidden, messages, roomState, sendEvent, sendProgress]);
+
   useEffect(
     () => () => {
+      closeSocket(true);
       wipeLocalSession();
-      closeSocket();
     },
     [closeSocket, wipeLocalSession]
   );
@@ -458,6 +702,7 @@ export const useSecretRoom = () => {
       securityCode,
       statusText,
       isBlurred,
+      isWindowHidden,
       now,
       joinRoom,
       sendTextMessage,
@@ -471,6 +716,7 @@ export const useSecretRoom = () => {
       destroyRoom,
       hideWindow,
       isBlurred,
+      isWindowHidden,
       joinRoom,
       messages,
       now,

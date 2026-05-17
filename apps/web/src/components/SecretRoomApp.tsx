@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 import {
   AlertCircle,
@@ -16,7 +17,7 @@ import {
   X
 } from "lucide-react";
 import { useSecretRoom } from "@/hooks/useSecretRoom";
-import { burnOptions, type BurnAfterMs, type LocalMessage } from "@/types/protocol";
+import { burnOptions, type BurnAfterMs, type LocalMessage, type RoomState } from "@/types/protocol";
 
 type RoomController = ReturnType<typeof useSecretRoom>;
 
@@ -28,9 +29,10 @@ export function SecretRoomApp() {
       <BackgroundEffect />
       {room.roomState === "idle" || room.roomState === "joining" ? <JoinRoomForm room={room} /> : null}
       {room.roomState === "waiting" ? <WaitingRoom room={room} /> : null}
-      {room.roomState === "active" || room.roomState === "hidden" ? <ChatRoom room={room} /> : null}
+      {["active", "peer_offline", "suspended"].includes(room.roomState) ? <ChatRoom room={room} /> : null}
       {room.roomState === "unavailable" ? <UnavailableRoom room={room} /> : null}
       {room.roomState === "destroyed" ? <DestroyedRoom room={room} /> : null}
+      {room.roomState === "expired" ? <ExpiredRoom room={room} /> : null}
     </main>
   );
 }
@@ -62,13 +64,13 @@ function JoinRoomForm({ room }: { room: RoomController }) {
               <Shield className="size-7 text-brand" strokeWidth={1.5} />
             </div>
           </div>
-          <h1 className="mb-3 text-2xl font-bold uppercase tracking-[3px] text-bright">临时密聊房间</h1>
+          <h1 className="mb-3 text-2xl font-bold uppercase text-bright">临时密聊房间</h1>
           <p className="mb-2 text-sm font-semibold uppercase tracking-[2px] text-brand">Secret Room</p>
           <p className="mx-auto max-w-[19rem] px-2 text-sm leading-relaxed text-dim sm:max-w-none">
             输入相同的房间号和口令，唤醒一个只容纳两人的临时房间。
           </p>
           <p className="mx-auto mt-2 max-w-[20rem] px-4 text-xs leading-relaxed text-mute sm:max-w-none">
-            无需账号、昵称、头像或好友关系。消息只在浏览器内解密。
+            无账号、无昵称、无头像。服务端只短期保存密文，用于断线后恢复。
           </p>
         </div>
 
@@ -131,9 +133,9 @@ function JoinRoomForm({ room }: { room: RoomController }) {
         {room.statusText ? <p className="mt-4 text-center text-xs text-dim">{room.statusText}</p> : null}
 
         <div className="mt-8 flex flex-col gap-3 border-t border-line pt-6">
-          <SecurityNote icon={<Lock className="size-3.5" />} text="服务端只转发密文，不保存聊天记录。" />
-          <SecurityNote icon={<EyeOff className="size-3.5" />} text="IP 仅用于风险防范，不展示给任何用户。" />
-          <SecurityNote icon={<Shield className="size-3.5" />} text="关闭页面后，本地消息和临时密钥自然丢失。" />
+          <SecurityNote icon={<Lock className="size-3.5" />} text="服务端不接触明文、口令或房间消息密钥。" />
+          <SecurityNote icon={<EyeOff className="size-3.5" />} text="IP 仅用于风控，不展示给任何用户。" />
+          <SecurityNote icon={<Shield className="size-3.5" />} text="刷新后需重新输入房间号和口令来恢复未焚毁密文。" />
         </div>
 
         <div className="mt-8 border border-danger/20 bg-danger/5 px-4 py-3 text-center">
@@ -144,7 +146,7 @@ function JoinRoomForm({ room }: { room: RoomController }) {
   );
 }
 
-function SecurityNote({ icon, text }: { icon: React.ReactNode; text: string }) {
+function SecurityNote({ icon, text }: { icon: ReactNode; text: string }) {
   return (
     <div className="flex items-start gap-2.5 text-mute">
       <span className="mt-0.5 shrink-0">{icon}</span>
@@ -186,13 +188,17 @@ function WaitingRoom({ room }: { room: RoomController }) {
             <span className="truncate text-sm text-bright">{room.roomNumber}</span>
           </div>
           <div className="mt-3 border-t border-line pt-3">
-            <p className="text-xs leading-relaxed text-dim">安全码会在第二端进入、双方完成临时公钥交换后生成。</p>
+            <p className="text-xs leading-relaxed text-dim">
+              安全码已由房间号和口令派生。双方看到的安全码不一致时，请停止使用。
+            </p>
           </div>
         </div>
 
+        <SecurityCode value={room.securityCode} />
+
         <button
           onClick={room.reset}
-          className="inline-flex items-center gap-2 border border-line px-5 py-2.5 text-xs uppercase tracking-[2px] text-dim transition-colors hover:border-danger/50 hover:text-danger"
+          className="mt-8 inline-flex items-center gap-2 border border-line px-5 py-2.5 text-xs uppercase tracking-[2px] text-dim transition-colors hover:border-danger/50 hover:text-danger"
         >
           <ArrowLeft className="size-3.5" />
           离开房间
@@ -206,24 +212,23 @@ function ChatRoom({ room }: { room: RoomController }) {
   const [inputText, setInputText] = useState("");
   const [showDestroyDialog, setShowDestroyDialog] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
+  const canSend = ["active", "peer_offline"].includes(room.roomState);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
   }, [room.messages]);
 
-  if (room.roomState === "hidden") {
-    return <HiddenOverlay onReveal={room.revealWindow} />;
-  }
-
   return (
     <section className="relative z-10 flex h-[100dvh] flex-col overflow-hidden">
+      {room.isWindowHidden ? <HiddenOverlay onReveal={room.revealWindow} /> : null}
+
       <header className="shrink-0 border-b border-line bg-panel/90 backdrop-blur-sm">
         <div className="mx-auto max-w-3xl px-3 py-2.5 md:px-4">
           <div className="mb-2 flex items-center justify-between gap-4">
             <div className="flex min-w-0 items-center gap-2">
-              <span className="size-1.5 shrink-0 animate-pulse bg-brand" />
+              <span className={`size-1.5 shrink-0 ${room.roomState === "active" ? "animate-pulse bg-brand" : "bg-danger"}`} />
               <span className="truncate text-xs font-semibold uppercase tracking-[2px] text-brand">
-                {room.statusText || "房间已唤醒"}
+                {room.statusText || roomStatusLabel(room.roomState)}
               </span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -252,11 +257,11 @@ function ChatRoom({ room }: { room: RoomController }) {
       <div className="min-h-0 flex-1 overflow-y-auto scrollbar-hide">
         <div
           className={`mx-auto flex min-h-full max-w-3xl flex-col gap-4 px-3 py-5 transition duration-200 md:px-4 md:py-6 ${
-            room.isBlurred ? "blur-sm select-none" : ""
+            room.isBlurred || room.isWindowHidden ? "blur-sm select-none" : ""
           }`}
         >
           {room.messages.length === 0 ? (
-            <EmptyConversation />
+            <EmptyConversation roomState={room.roomState} />
           ) : (
             room.messages.map((message) => <MessageBubble key={message.id} message={message} now={room.now} />)
           )}
@@ -279,14 +284,15 @@ function ChatRoom({ room }: { room: RoomController }) {
             <input
               value={inputText}
               onChange={(event) => setInputText(event.target.value)}
-              className="min-w-0 flex-1 border-b border-brand/30 bg-transparent px-0 py-2.5 text-sm text-bright outline-none transition-colors placeholder:text-mute focus:border-brand"
-              placeholder="输入加密消息..."
+              disabled={!canSend}
+              className="min-w-0 flex-1 border-b border-brand/30 bg-transparent px-0 py-2.5 text-sm text-bright outline-none transition-colors placeholder:text-mute focus:border-brand disabled:cursor-not-allowed disabled:opacity-40"
+              placeholder={canSend ? "输入加密消息..." : "重新进入房间后继续发送"}
               autoComplete="off"
               spellCheck={false}
             />
             <button
               type="submit"
-              disabled={!inputText.trim()}
+              disabled={!inputText.trim() || !canSend}
               className="inline-flex shrink-0 items-center gap-1.5 bg-brand px-4 py-2.5 text-xs font-bold uppercase tracking-[2px] text-ink transition-colors hover:bg-[#00a88f] disabled:cursor-not-allowed disabled:opacity-30"
             >
               <Send className="size-3.5" />
@@ -294,7 +300,7 @@ function ChatRoom({ room }: { room: RoomController }) {
             </button>
           </form>
           <p className="mt-2 text-xs text-mute">
-            对方成功解密后开始倒计时，当前 {room.selectedBurnTime / 1000} 秒。
+            对方真正看见后才开始倒计时，当前 {room.selectedBurnTime / 1000} 秒。
           </p>
           <p className="mt-1 text-xs text-danger/70">无法阻止屏幕截图或拍照，请在可信环境中使用。</p>
         </div>
@@ -311,6 +317,13 @@ function ChatRoom({ room }: { room: RoomController }) {
       ) : null}
     </section>
   );
+}
+
+function roomStatusLabel(state: RoomState) {
+  if (state === "active") return "双方在线";
+  if (state === "peer_offline") return "对方已离线，房间仍保留";
+  if (state === "suspended") return "房间暂时无人在线，可重新唤醒";
+  return "等待另一端";
 }
 
 function SecurityCode({ value }: { value: string }) {
@@ -333,21 +346,25 @@ function SecurityCode({ value }: { value: string }) {
       {expanded ? (
         <div className="border-t border-brand/10 px-3 py-3">
           <p className="mb-2 break-words text-lg font-semibold tracking-[2px] text-brand sm:text-xl">{value}</p>
-          <p className="text-xs leading-relaxed text-dim">请通过其他可信渠道核对安全码，确认双方看到的号码完全一致。</p>
+          <p className="text-xs leading-relaxed text-dim">
+            请通过其他可信渠道核对安全码。安全码不一致时，说明房间号或口令不同，或连接环境不可信。
+          </p>
         </div>
       ) : null}
     </div>
   );
 }
 
-function EmptyConversation() {
+function EmptyConversation({ roomState }: { roomState: RoomState }) {
   return (
     <div className="flex flex-1 flex-col items-center justify-center py-16 text-center">
       <div className="mb-4 flex size-12 items-center justify-center border border-line">
         <Lock className="size-5 text-mute" />
       </div>
       <p className="mb-1 text-xs uppercase tracking-[2px] text-mute">密聊已就绪</p>
-      <p className="text-xs text-mute/70">发送消息开始对话</p>
+      <p className="text-xs text-mute/70">
+        {roomState === "peer_offline" ? "对方离线时消息会先暂存为密文。" : "发送消息开始对话。"}
+      </p>
     </div>
   );
 }
@@ -386,7 +403,7 @@ function BurnTimeSelector({
 function MessageBubble({ message, now }: { message: LocalMessage; now: number }) {
   const isMe = message.from === "me";
   const timeLeft =
-    message.status === "burning" && message.expireAt ? Math.max(0, message.expireAt - now) : undefined;
+    message.status === "burning" && message.burnAt ? Math.max(0, message.burnAt - now) : undefined;
   const progress = timeLeft === undefined ? 0 : Math.max(0, Math.min(100, (timeLeft / message.burnAfterMs) * 100));
 
   return (
@@ -399,13 +416,8 @@ function MessageBubble({ message, now }: { message: LocalMessage; now: number })
         <p className={`mb-1.5 text-xs font-semibold uppercase tracking-[2px] ${isMe ? "text-brand" : "text-dim"}`}>
           {isMe ? "你" : "对方"}
         </p>
-        <p className="break-words text-sm leading-relaxed text-bright">{message.text}</p>
-        {message.status === "pending" ? (
-          <p className="mt-2 text-xs uppercase tracking-[1px] text-mute">等待对方查看</p>
-        ) : null}
-        {message.status === "visible" && !isMe ? (
-          <p className="mt-2 text-xs uppercase tracking-[1px] text-brand/50">已解密，等待同步销毁计时</p>
-        ) : null}
+        <p className="break-words text-sm leading-relaxed text-bright">{message.text ?? "无法解密"}</p>
+        <MessageStatusLine message={message} {...(timeLeft !== undefined ? { timeLeft } : {})} />
         {message.status === "burning" && timeLeft !== undefined ? (
           <div className="mt-3 flex items-center gap-2">
             <div className="h-0.5 flex-1 overflow-hidden bg-line">
@@ -419,6 +431,36 @@ function MessageBubble({ message, now }: { message: LocalMessage; now: number })
   );
 }
 
+function MessageStatusLine({ message, timeLeft }: { message: LocalMessage; timeLeft?: number }) {
+  const text = messageStatusText(message, timeLeft);
+  const tone =
+    message.status === "failed" || message.status === "undecryptable"
+      ? "text-danger"
+      : message.status === "burning"
+        ? "text-danger/90"
+        : "text-mute";
+
+  return <p className={`mt-2 text-xs uppercase tracking-[1px] ${tone}`}>{text}</p>;
+}
+
+function messageStatusText(message: LocalMessage, timeLeft?: number) {
+  if (message.status === "sending") return "发送中";
+  if (message.status === "server_ack") return "已发送";
+  if (message.status === "stored") return message.from === "me" ? "已暂存，等待对方查看" : "已暂存";
+  if (message.status === "delivered") return message.from === "me" ? "已送达" : "已收到";
+  if (message.status === "decrypted" || message.status === "visible") {
+    return message.from === "me" ? "等待对方查看" : "已解密，等待同步";
+  }
+  if (message.status === "seen") return "对方已查看";
+  if (message.status === "burning" && timeLeft !== undefined) {
+    return `对方已查看，${Math.ceil(timeLeft / 1000)} 秒后焚毁`;
+  }
+  if (message.status === "peer_offline") return "对方离线，等待其重新进入";
+  if (message.status === "undecryptable") return "无法解密";
+  if (message.status === "failed") return "发送失败";
+  return "已发送";
+}
+
 function HiddenOverlay({ onReveal }: { onReveal: () => void }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink/95 px-4 backdrop-blur-xl">
@@ -430,7 +472,7 @@ function HiddenOverlay({ onReveal }: { onReveal: () => void }) {
           </div>
         </div>
         <h3 className="mb-2 text-lg font-bold uppercase tracking-[2px] text-bright">窗口已隐藏</h3>
-        <p className="mb-8 text-xs text-dim">聊天内容已被遮罩。</p>
+        <p className="mb-8 text-xs text-dim">聊天内容已被遮罩。隐藏期间不会发送已看见回执。</p>
         <button
           onClick={onReveal}
           className="inline-flex items-center gap-2 bg-brand px-6 py-3 text-sm font-bold uppercase tracking-[2px] text-ink transition-colors hover:bg-[#00a88f]"
@@ -461,7 +503,9 @@ function DestroyRoomDialog({ onClose, onDestroy }: { onClose: () => void; onDest
           </button>
         </div>
         <div className="flex flex-col gap-4 p-4">
-          <p className="text-sm leading-relaxed text-bright">此操作会立即结束当前会话，并清除双方界面中的本地消息。</p>
+          <p className="text-sm leading-relaxed text-bright">
+            确认销毁房间？销毁后，本房间内所有暂存密文和状态都会被清除，无法恢复。
+          </p>
           <p className="text-xs leading-relaxed text-dim">请输入“销毁”确认。</p>
           <input
             value={confirmText}
@@ -472,7 +516,10 @@ function DestroyRoomDialog({ onClose, onDestroy }: { onClose: () => void; onDest
           />
         </div>
         <div className="flex border-t border-line">
-          <button onClick={onClose} className="flex-1 border-r border-line py-3 text-xs uppercase tracking-[2px] text-dim transition-colors hover:bg-message">
+          <button
+            onClick={onClose}
+            className="flex-1 border-r border-line py-3 text-xs uppercase tracking-[2px] text-dim transition-colors hover:bg-message"
+          >
             取消
           </button>
           <button
@@ -506,8 +553,21 @@ function DestroyedRoom({ room }: { room: RoomController }) {
   return (
     <CenteredNotice
       icon={<Trash2 className="size-6 text-danger" strokeWidth={1.5} />}
-      title="会话已销毁"
-      body="本地消息、临时密钥和会话状态已经清除。"
+      title="房间已销毁"
+      body="本地消息、临时密钥和服务端暂存密文状态已经清除。"
+      actionLabel="返回首页"
+      onAction={room.reset}
+      tone="danger"
+    />
+  );
+}
+
+function ExpiredRoom({ room }: { room: RoomController }) {
+  return (
+    <CenteredNotice
+      icon={<Clock className="size-6 text-danger" strokeWidth={1.5} />}
+      title="房间已过期"
+      body="房间超过保留时间，服务端内存状态已经清除。"
       actionLabel="返回首页"
       onAction={room.reset}
       tone="danger"
@@ -523,7 +583,7 @@ function CenteredNotice({
   onAction,
   tone
 }: {
-  icon: React.ReactNode;
+  icon: ReactNode;
   title: string;
   body: string;
   actionLabel: string;

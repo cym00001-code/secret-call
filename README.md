@@ -209,7 +209,10 @@ pnpm dev:web
 pnpm lint
 pnpm typecheck
 pnpm build
+pnpm test:e2e
 ```
+
+`pnpm test:e2e` 会启动本地 web/server，并用真实 Chromium 浏览器覆盖双人加入、第三人模糊拒绝、刷新恢复未焚毁密文、隐藏窗口不触发 seen。
 
 ## 环境变量
 

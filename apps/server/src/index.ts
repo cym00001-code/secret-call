@@ -86,6 +86,10 @@ const logWs = (
     risk?: string | undefined;
     result?: string | undefined;
     state?: string | undefined;
+    roomStatus?: string | undefined;
+    onlineClients?: number | undefined;
+    logicalClients?: number | undefined;
+    pendingMessages?: number | undefined;
   } = {}
 ) => {
   app.log.info(
@@ -97,11 +101,22 @@ const logWs = (
       errorType: meta.errorType,
       risk: meta.risk,
       result: meta.result,
-      state: meta.state
+      state: meta.state,
+      roomStatus: meta.roomStatus,
+      onlineClients: meta.onlineClients,
+      logicalClients: meta.logicalClients,
+      pendingMessages: meta.pendingMessages
     },
     "ws"
   );
 };
+
+const roomLogMeta = (room: RoomState) => ({
+  roomStatus: room.status,
+  onlineClients: room.clients.size,
+  logicalClients: room.clients.size,
+  pendingMessages: room.pendingMessages.size
+});
 
 const send = (client: ClientState, event: ServerEvent) => {
   if (client.ws.readyState !== WebSocket.OPEN) return;
@@ -200,6 +215,31 @@ const pruneRoomMessages = (room: RoomState, now = Date.now()) => {
       room.burnedMessageIds.set(messageId, now + burnedIdTtlMs);
     }
   }
+};
+
+const pruneDisconnectedClients = (room: RoomState) => {
+  let removed = 0;
+  for (const [clientId, client] of room.clients.entries()) {
+    if (client.ws.readyState === WebSocket.OPEN) continue;
+    room.clients.delete(clientId);
+    delete client.roomIdHash;
+    client.closed = true;
+    clients.delete(client);
+    removed += 1;
+  }
+
+  if (removed > 0) {
+    room.updatedAt = Date.now();
+    if (room.clients.size === 0) {
+      room.status = "suspended";
+      room.suspendedAt = room.updatedAt;
+    } else if (room.status === "active") {
+      room.status = "peer_offline";
+      delete room.suspendedAt;
+    }
+  }
+
+  return removed;
 };
 
 const sendHistory = (client: ClientState, room: RoomState) => {
@@ -331,13 +371,22 @@ const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "ro
   const room = existing ?? createRoom(event.roomIdHash, now);
 
   pruneRoomMessages(room, now);
+  const prunedClients = pruneDisconnectedClients(room);
+  logWs("room:join:state", {
+    roomIdHash: event.roomIdHash,
+    clientId: event.clientId,
+    result: "before-join",
+    ...(prunedClients > 0 ? { errorType: "stale-clients-pruned" } : {}),
+    ...roomLogMeta(room)
+  });
 
   if (room.destroying || room.expireAt <= now || room.clients.size >= 2) {
     send(client, { type: "room:unavailable" });
     logWs("room:join", {
       roomIdHash: event.roomIdHash,
       clientId: event.clientId,
-      result: "unavailable"
+      result: "unavailable",
+      ...roomLogMeta(room)
     });
     return;
   }
@@ -368,7 +417,8 @@ const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "ro
     logWs("room:join", {
       roomIdHash: event.roomIdHash,
       clientId: event.clientId,
-      result: room.status
+      result: room.status,
+      ...roomLogMeta(room)
     });
     return;
   }
@@ -387,7 +437,8 @@ const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "ro
   logWs("room:join", {
     roomIdHash: event.roomIdHash,
     clientId: event.clientId,
-    result: "active"
+    result: "active",
+    ...roomLogMeta(room)
   });
 };
 
@@ -490,7 +541,8 @@ const handleSend = (client: ClientState, event: Extract<ClientEvent, { type: "me
     clientId: event.clientId,
     messageId: event.message.messageId,
     result: room.clients.size > 1 ? "forwarded" : "stored",
-    state: pending.state
+    state: pending.state,
+    ...roomLogMeta(room)
   });
 };
 

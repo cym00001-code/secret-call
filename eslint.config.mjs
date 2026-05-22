@@ -9,6 +9,10 @@ export default [
       "**/node_modules/**",
       "**/.next/**",
       "**/dist/**",
+      "**/out/**",
+      "**/data/**",
+      "apps/mobile/android/app/src/main/assets/**",
+      "apps/mobile/ios/App/App/public/**",
       "**/coverage/**",
       "apps/web/next-env.d.ts"
     ]
@@ -49,6 +53,14 @@ export default [
     languageOptions: {
       globals: {
         module: "readonly"
+      }
+    }
+  },
+  {
+    files: ["apps/web/next.config.mjs"],
+    languageOptions: {
+      globals: {
+        process: "readonly"
       }
     }
   }

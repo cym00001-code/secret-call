@@ -1,17 +1,21 @@
 ﻿"use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { decryptText, deriveRoomMaterial, encryptText, randomToken } from "@/lib/crypto";
+import { decryptMessagePayload, deriveRoomMaterial, encryptAttachment, encryptText, randomToken } from "@/lib/crypto";
 import type {
   BurnAfterMs,
   CipherMessage,
   ClientEvent,
+  DecryptedLocalAttachment,
+  DisplayLocalAttachment,
   HistoryMessage,
   LocalMessage,
   LocalMessageStatus,
   RoomState,
+  SecurityEventKind,
   ServerEvent
 } from "@/types/protocol";
+import { maxAttachmentBytes } from "@/types/protocol";
 
 interface ActiveMaterial {
   roomIdHash: string;
@@ -58,6 +62,23 @@ const resolveWsUrl = () => {
 const statusFromServerState = (state: HistoryMessage["state"]): LocalMessageStatus =>
   state === "seen" ? "seen" : state;
 
+const isSupportedAttachment = (file: File) => file.type.startsWith("image/") || file.type.startsWith("video/");
+
+const createDisplayAttachment = (attachment: DecryptedLocalAttachment): DisplayLocalAttachment => ({
+  kind: attachment.kind,
+  name: attachment.name,
+  mimeType: attachment.mimeType,
+  size: attachment.size,
+  objectUrl: URL.createObjectURL(new Blob([attachment.bytes.slice()], { type: attachment.mimeType }))
+});
+
+const securityKindText: Record<SecurityEventKind, string> = {
+  screenshot: "截图",
+  screen_recording_started: "录屏开始",
+  screen_recording_stopped: "录屏停止",
+  screen_projection: "投屏或镜像"
+};
+
 export const useSecretRoom = () => {
   const [roomState, setRoomState] = useState<RoomState>("idle");
   const [roomNumber, setRoomNumber] = useState("");
@@ -69,6 +90,7 @@ export const useSecretRoom = () => {
   const [isWindowHidden, setIsWindowHidden] = useState(false);
   const [now, setNow] = useState(() => Date.now());
 
+  const messagesRef = useRef<LocalMessage[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const activeRef = useRef<ActiveMaterial | null>(null);
   const burnTimersRef = useRef(new Map<string, ReturnType<typeof setTimeout>>());
@@ -103,6 +125,10 @@ export const useSecretRoom = () => {
   }, [roomState]);
 
   useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
     isBlurredRef.current = isBlurred;
   }, [isBlurred]);
 
@@ -117,6 +143,19 @@ export const useSecretRoom = () => {
     burnTimersRef.current.clear();
   }, []);
 
+  const revokeDisplayAttachment = useCallback((attachment: DisplayLocalAttachment | undefined) => {
+    if (attachment) URL.revokeObjectURL(attachment.objectUrl);
+  }, []);
+
+  const revokeMessageAttachments = useCallback(
+    (items: LocalMessage[]) => {
+      for (const message of items) {
+        revokeDisplayAttachment(message.displayAttachment);
+      }
+    },
+    [revokeDisplayAttachment]
+  );
+
   const clearJoinTimeout = useCallback(() => {
     if (joinTimeoutRef.current) {
       clearTimeout(joinTimeoutRef.current);
@@ -127,6 +166,7 @@ export const useSecretRoom = () => {
   const wipeLocalSession = useCallback(() => {
     clearJoinTimeout();
     clearBurnTimers();
+    revokeMessageAttachments(messagesRef.current);
     activeRef.current = null;
     visibleSentRef.current.clear();
     seenSentRef.current.clear();
@@ -134,7 +174,7 @@ export const useSecretRoom = () => {
     decryptedSentRef.current.clear();
     setMessages([]);
     setSecurityCode("");
-  }, [clearBurnTimers, clearJoinTimeout]);
+  }, [clearBurnTimers, clearJoinTimeout, revokeMessageAttachments]);
 
   const sendEvent = useCallback((event: ClientEvent) => {
     const socket = wsRef.current;
@@ -142,6 +182,20 @@ export const useSecretRoom = () => {
     socket.send(JSON.stringify(event));
     return true;
   }, []);
+
+  const addSystemMessage = useCallback((text: string, createdAt = estimateServerNow()) => {
+    setMessages((current) => [
+      ...current,
+      {
+        id: randomToken("sys"),
+        from: "system",
+        systemText: text,
+        burnAfterMs: 60000,
+        createdAt,
+        status: "stored"
+      }
+    ]);
+  }, [estimateServerNow]);
 
   const sendLeave = useCallback(() => {
     const active = activeRef.current;
@@ -177,12 +231,17 @@ export const useSecretRoom = () => {
       const delay = Math.max(0, burnAt - estimateServerNow());
       const timer = setTimeout(() => {
         burnTimersRef.current.delete(messageId);
-        setMessages((current) => current.filter((message) => message.id !== messageId));
+        setMessages((current) => {
+          for (const message of current) {
+            if (message.id === messageId) revokeDisplayAttachment(message.displayAttachment);
+          }
+          return current.filter((message) => message.id !== messageId);
+        });
       }, delay);
 
       burnTimersRef.current.set(messageId, timer);
     },
-    [estimateServerNow]
+    [estimateServerNow, revokeDisplayAttachment]
   );
 
   const updateMessageStatus = useCallback(
@@ -208,8 +267,13 @@ export const useSecretRoom = () => {
     const timer = burnTimersRef.current.get(messageId);
     if (timer) clearTimeout(timer);
     burnTimersRef.current.delete(messageId);
-    setMessages((current) => current.filter((message) => message.id !== messageId));
-  }, []);
+    setMessages((current) => {
+      for (const message of current) {
+        if (message.id === messageId) revokeDisplayAttachment(message.displayAttachment);
+      }
+      return current.filter((message) => message.id !== messageId);
+    });
+  }, [revokeDisplayAttachment]);
 
   const sendProgress = useCallback(
     (type: "message:delivered" | "message:decrypted" | "message:visible", messageId: string) => {
@@ -272,10 +336,21 @@ export const useSecretRoom = () => {
       }
 
       try {
-        const text = await decryptText(active.roomMessageKey, active.roomIdHash, encrypted);
+        const payload = await decryptMessagePayload(active.roomMessageKey, active.roomIdHash, encrypted);
         if (from === "peer") {
           sendDecrypted(encrypted.messageId);
         }
+        const decryptedText = payload.type === "text" ? payload.text : undefined;
+        const decryptedAttachment =
+          payload.type === "attachment"
+            ? {
+                kind: payload.kind,
+                name: payload.name,
+                mimeType: payload.mimeType,
+                size: payload.size,
+                bytes: payload.bytes
+              }
+            : undefined;
 
         setMessages((current) => {
           const already = current.some((message) => message.id === encrypted.messageId);
@@ -284,8 +359,12 @@ export const useSecretRoom = () => {
               message.id === encrypted.messageId
                 ? {
                     ...message,
-                    decryptedText: text,
-                    ...(from === "me" ? { displayText: text } : {}),
+                    ...(decryptedText ? { decryptedText } : {}),
+                    ...(decryptedAttachment ? { decryptedAttachment } : {}),
+                    ...(from === "me" && decryptedText ? { displayText: decryptedText } : {}),
+                    ...(from === "me" && decryptedAttachment && !message.displayAttachment
+                      ? { displayAttachment: createDisplayAttachment(decryptedAttachment) }
+                      : {}),
                     ciphertext: encrypted.ciphertext,
                     iv: encrypted.iv,
                     aad: encrypted.aad,
@@ -307,8 +386,12 @@ export const useSecretRoom = () => {
             {
               id: encrypted.messageId,
               from,
-              decryptedText: text,
-              ...(from === "me" ? { displayText: text } : {}),
+              ...(decryptedText ? { decryptedText } : {}),
+              ...(decryptedAttachment ? { decryptedAttachment } : {}),
+              ...(from === "me" && decryptedText ? { displayText: decryptedText } : {}),
+              ...(from === "me" && decryptedAttachment
+                ? { displayAttachment: createDisplayAttachment(decryptedAttachment) }
+                : {}),
               ciphertext: encrypted.ciphertext,
               iv: encrypted.iv,
               aad: encrypted.aad,
@@ -366,6 +449,9 @@ export const useSecretRoom = () => {
             burnAt,
             ...(wasRevealedByThisClient && message.decryptedText
               ? { displayText: message.decryptedText, revealedAt: seenAt }
+              : {}),
+            ...(wasRevealedByThisClient && message.decryptedAttachment && !message.displayAttachment
+              ? { displayAttachment: createDisplayAttachment(message.decryptedAttachment), revealedAt: seenAt }
               : {})
           };
         })
@@ -456,6 +542,15 @@ export const useSecretRoom = () => {
           if (event.messageId) updateMessageStatus(event.messageId, "failed");
           setStatusText(event.reason === "rate_limited" ? "连接过于频繁，请稍后再试" : "发送失败");
           break;
+        case "security:event": {
+          const isMe = event.byClientId === activeRef.current?.clientId;
+          const actor = isMe ? "本机" : "对方";
+          const action = securityKindText[event.kind];
+          const result = event.blocked ? "已被系统保护阻止或遮挡" : "已触发提醒";
+          addSystemMessage(`${actor}检测到${action}风险，${result}。`, event.serverTime);
+          if (isMe) setIsWindowHidden(true);
+          break;
+        }
         case "peer:left":
           setStatusText("对方已离线，房间仍保留");
           setRoomStateValue("peer_offline");
@@ -490,6 +585,7 @@ export const useSecretRoom = () => {
       }
     },
     [
+      addSystemMessage,
       closeSocket,
       clearJoinTimeout,
       handleEncryptedMessage,
@@ -646,6 +742,82 @@ export const useSecretRoom = () => {
     [selectedBurnTime, sendEvent, updateMessageStatus]
   );
 
+  const sendAttachmentMessage = useCallback(
+    async (file: File) => {
+      const active = activeRef.current;
+      if (!active || !["active", "peer_offline"].includes(roomStateRef.current)) return false;
+      if (!isSupportedAttachment(file)) {
+        setStatusText("只能发送图片或视频");
+        return false;
+      }
+      if (file.size <= 0 || file.size > maxAttachmentBytes) {
+        setStatusText(`附件不能超过 ${Math.floor(maxAttachmentBytes / 1024 / 1024)} MB`);
+        return false;
+      }
+
+      try {
+        const bytes = new Uint8Array(await file.arrayBuffer());
+        const fileForEncryption = {
+          name: file.name,
+          type: file.type,
+          size: file.size,
+          arrayBuffer: async () => {
+            const copy = new Uint8Array(bytes.byteLength);
+            copy.set(bytes);
+            return copy.buffer;
+          }
+        };
+        const encrypted = await encryptAttachment(
+          active.roomMessageKey,
+          active.roomIdHash,
+          active.clientId,
+          fileForEncryption,
+          selectedBurnTime
+        );
+        const decryptedAttachment: DecryptedLocalAttachment = {
+          kind: file.type.startsWith("video/") ? "video" : "image",
+          name: file.name,
+          mimeType: file.type,
+          size: file.size,
+          bytes
+        };
+        const displayAttachment = createDisplayAttachment(decryptedAttachment);
+
+        setMessages((current) => [
+          ...current,
+          {
+            id: encrypted.messageId,
+            from: "me",
+            decryptedAttachment,
+            displayAttachment,
+            ciphertext: encrypted.ciphertext,
+            iv: encrypted.iv,
+            aad: encrypted.aad,
+            burnAfterMs: encrypted.burnAfterMs,
+            createdAt: encrypted.createdAt,
+            status: "sending"
+          }
+        ]);
+
+        const sent = sendEvent({
+          type: "message:send",
+          roomIdHash: active.roomIdHash,
+          clientId: active.clientId,
+          message: encrypted
+        });
+        if (!sent) {
+          updateMessageStatus(encrypted.messageId, "failed");
+          return false;
+        }
+        return true;
+      } catch {
+        setStatusText("附件发送失败");
+        return false;
+      }
+    },
+    [selectedBurnTime, sendEvent, updateMessageStatus]
+  );
+
   const destroyRoom = useCallback(() => {
     const active = activeRef.current;
     if (active) {
@@ -680,6 +852,34 @@ export const useSecretRoom = () => {
     setIsWindowHidden(false);
   }, []);
 
+  const reportSecurityEvent = useCallback(
+    ({
+      kind,
+      platform,
+      blocked,
+      detectedAt
+    }: {
+      kind: SecurityEventKind;
+      platform: "android" | "ios" | "web";
+      blocked: boolean;
+      detectedAt: number;
+    }) => {
+      setIsWindowHidden(true);
+      const active = activeRef.current;
+      if (!active) return;
+      sendEvent({
+        type: "security:event",
+        roomIdHash: active.roomIdHash,
+        clientId: active.clientId,
+        kind,
+        platform,
+        blocked,
+        detectedAt
+      });
+    },
+    [sendEvent]
+  );
+
   const confirmPeerMessageSeen = useCallback(
     (messageId: string) => {
       if (!canConfirmSeen() || seenSentRef.current.has(messageId)) return false;
@@ -688,8 +888,8 @@ export const useSecretRoom = () => {
       if (
         !message ||
         message.from !== "peer" ||
-        !message.decryptedText ||
-        message.displayText ||
+        (!message.decryptedText && !message.decryptedAttachment) ||
+        Boolean(message.displayText || message.displayAttachment) ||
         message.status === "undecryptable" ||
         message.status === "burning" ||
         message.status === "burned"
@@ -717,7 +917,8 @@ export const useSecretRoom = () => {
       if (sent) {
         seenSentRef.current.add(message.id);
         updateMessageStatus(message.id, "visible", {
-          displayText: message.decryptedText,
+          ...(message.decryptedText ? { displayText: message.decryptedText } : {}),
+          ...(message.decryptedAttachment ? { displayAttachment: createDisplayAttachment(message.decryptedAttachment) } : {}),
           revealedAt: estimateServerNow()
         });
       }
@@ -744,6 +945,31 @@ export const useSecretRoom = () => {
     };
   }, []);
 
+  useEffect(() => {
+    const listener = (event: Event) => {
+      const detail = (event as CustomEvent).detail;
+      if (
+        typeof detail !== "object" ||
+        detail === null ||
+        !("kind" in detail) ||
+        !("platform" in detail) ||
+        typeof detail.kind !== "string" ||
+        typeof detail.platform !== "string"
+      ) {
+        return;
+      }
+      reportSecurityEvent({
+        kind: detail.kind as SecurityEventKind,
+        platform: detail.platform === "android" || detail.platform === "ios" ? detail.platform : "web",
+        blocked: Boolean("blocked" in detail ? detail.blocked : false),
+        detectedAt: typeof detail.detectedAt === "number" ? detail.detectedAt : Date.now()
+      });
+    };
+
+    window.addEventListener("security:capture_event", listener);
+    return () => window.removeEventListener("security:capture_event", listener);
+  }, [reportSecurityEvent]);
+
   useEffect(
     () => () => {
       closeSocket(true);
@@ -765,6 +991,7 @@ export const useSecretRoom = () => {
       now,
       joinRoom,
       sendTextMessage,
+      sendAttachmentMessage,
       setSelectedBurnTime,
       confirmPeerMessageSeen,
       destroyRoom,
@@ -787,6 +1014,7 @@ export const useSecretRoom = () => {
       roomState,
       securityCode,
       selectedBurnTime,
+      sendAttachmentMessage,
       sendTextMessage,
       statusText
     ]

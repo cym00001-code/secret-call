@@ -4,6 +4,13 @@ dist
 coverage
 test-results
 playwright-report
+data
+apps/web/out
+apps/mobile/android/.gradle
+apps/mobile/android/build
+apps/mobile/android/app/build
+apps/mobile/android/app/src/main/assets/public
+apps/mobile/ios/App/App/public
 .env
 .env.*
 !.env.example

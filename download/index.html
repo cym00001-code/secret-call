@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Secret Room 下载</title>
+    <style>
+      :root {
+        color-scheme: dark;
+        background: #050505;
+        color: #e0e0e0;
+        font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        padding: 24px;
+        background:
+          linear-gradient(90deg, rgba(0, 143, 122, 0.06) 1px, transparent 1px),
+          linear-gradient(180deg, rgba(0, 143, 122, 0.04) 1px, transparent 1px),
+          #050505;
+        background-size: 42px 42px;
+      }
+      main {
+        width: min(680px, 100%);
+        border: 1px solid #222;
+        background: rgba(10, 10, 10, 0.94);
+      }
+      header, section { padding: 24px; border-bottom: 1px solid #222; }
+      section:last-child { border-bottom: 0; }
+      h1 { margin: 0 0 8px; font-size: 26px; }
+      h2 { margin: 0 0 14px; font-size: 16px; color: #008f7a; letter-spacing: 1px; text-transform: uppercase; }
+      p { margin: 0; color: #888; line-height: 1.75; font-size: 14px; }
+      dl { display: grid; grid-template-columns: 120px 1fr; gap: 12px; margin: 0; font-size: 13px; }
+      dt { color: #444; }
+      dd { margin: 0; color: #e0e0e0; overflow-wrap: anywhere; }
+      a.button {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        width: 100%;
+        margin-top: 18px;
+        background: #008f7a;
+        color: #050505;
+        text-decoration: none;
+        font-weight: 800;
+        letter-spacing: 1px;
+      }
+      .disabled {
+        display: grid;
+        place-items: center;
+        min-height: 44px;
+        width: 100%;
+        margin-top: 18px;
+        border: 1px solid rgba(217, 83, 79, 0.42);
+        color: #d9534f;
+      }
+      .note { color: #d9534f; font-size: 12px; }
+      code { color: #008f7a; }
+    </style>
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1>Secret Room</h1>
+        <p>Android 安装包下载页。每次正式发布后，这里会同步最新版本、文件大小、SHA256 和更新说明。</p>
+      </header>
+      <section>
+        <h2>当前版本</h2>
+        <dl>
+          <dt>平台</dt>
+          <dd id="platform">Android</dd>
+          <dt>版本</dt>
+          <dd id="version">暂未发布 APK</dd>
+          <dt>更新时间</dt>
+          <dd id="updatedAt">-</dd>
+          <dt>文件大小</dt>
+          <dd id="size">-</dd>
+          <dt>SHA256</dt>
+          <dd id="sha256">-</dd>
+        </dl>
+        <div id="downloadArea" class="disabled">Android APK 暂未发布</div>
+      </section>
+      <section>
+        <h2>说明</h2>
+        <p id="notes">第一版 App 正在构建中。Android 会启用系统级防截图保护；iOS 只能检测截图并提醒，不能阻止系统截图。</p>
+        <p class="note">请只从 <code>https://8.138.150.200/download</code> 下载安装包。</p>
+      </section>
+    </main>
+    <script>
+      fetch("/download/releases/manifest.json", { cache: "no-store" })
+        .then((response) => (response.ok ? response.json() : null))
+        .then((manifest) => {
+          if (!manifest || !manifest.android || !manifest.android.available) return;
+          const android = manifest.android;
+          document.getElementById("version").textContent = android.version;
+          document.getElementById("updatedAt").textContent = android.updatedAt;
+          document.getElementById("size").textContent = android.size;
+          document.getElementById("sha256").textContent = android.sha256;
+          document.getElementById("notes").textContent = android.notes;
+          const link = document.createElement("a");
+          link.href = android.url;
+          link.className = "button";
+          link.textContent = "下载 Android APK";
+          document.getElementById("downloadArea").replaceWith(link);
+        })
+        .catch(() => {});
+    </script>
+  </body>
+</html>

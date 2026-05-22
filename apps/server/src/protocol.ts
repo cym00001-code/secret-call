@@ -1,4 +1,5 @@
 export type BurnAfterMs = 5000 | 10000 | 30000 | 60000;
+export type SecurityEventKind = "screenshot" | "screen_recording_started" | "screen_recording_stopped" | "screen_projection";
 
 export type PendingMessageState =
   | "stored"
@@ -87,6 +88,15 @@ export type ClientEvent =
       burnedAt: number;
     }
   | {
+      type: "security:event";
+      roomIdHash: string;
+      clientId: string;
+      kind: SecurityEventKind;
+      platform: "android" | "ios" | "web";
+      blocked: boolean;
+      detectedAt: number;
+    }
+  | {
       type: "ping";
       clientId?: string;
       sentAt?: number;
@@ -116,6 +126,15 @@ export type ServerEvent =
   | { type: "message:seen"; messageId: string; seenBy: string; seenAt: number; burnAt: number; serverTime: number }
   | { type: "message:burn"; messageId: string; burnedAt: number; serverTime: number }
   | { type: "message:failed"; messageId?: string; reason: "unavailable" | "invalid" | "rate_limited" }
+  | {
+      type: "security:event";
+      kind: SecurityEventKind;
+      platform: "android" | "ios" | "web";
+      blocked: boolean;
+      detectedAt: number;
+      byClientId: string;
+      serverTime: number;
+    }
   | { type: "peer:left"; serverTime: number }
   | { type: "peer:reconnected"; serverTime: number }
   | { type: "error"; message: string }

@@ -1,0 +1,15 @@
+{
+  "android": {
+    "available": false,
+    "version": "0.1.0",
+    "updatedAt": "",
+    "size": "",
+    "sha256": "",
+    "url": "",
+    "notes": "Android APK 工程已纳入仓库，等待首次 release 构建后发布安装包。"
+  },
+  "ios": {
+    "available": false,
+    "notes": "iOS 第一版仅做能力预留；后续如使用 TestFlight 或其他分发方式，会在此页面更新。"
+  }
+}

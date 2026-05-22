@@ -16,8 +16,8 @@ const joinTwoUsers = async (browser: Browser, room: string, passphrase: string) 
   await joinRoom(pageA, room, passphrase);
   await expect(pageA.getByText("等待另一端唤醒房间")).toBeVisible();
   await joinRoom(pageB, room, passphrase);
-  await expect(pageA.getByText("双方在线")).toBeVisible();
-  await expect(pageB.getByText("双方在线")).toBeVisible();
+  await expect(pageA.getByText("房间已封锁，双方在线")).toBeVisible();
+  await expect(pageB.getByText("房间已封锁，双方在线")).toBeVisible();
 
   return { contextA, contextB, pageA, pageB };
 };
@@ -26,6 +26,11 @@ const readCountdownSeconds = async (page: Page) => {
   const text = await page.getByTestId("burn-countdown").last().innerText();
   return Number(text.replace("s", ""));
 };
+
+const tinyPng = Buffer.from(
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==",
+  "base64"
+);
 
 test("two users can join the same room without endless loading", async ({ browser }) => {
   const room = `test-room-001-${Date.now()}`;
@@ -54,6 +59,25 @@ test("third user only sees an unavailable room", async ({ browser }) => {
   await contextC.close();
 });
 
+test("offline secret can be created and opened with passcode", async ({ page }) => {
+  const secretText = `离线密信-${Date.now()}`;
+
+  await page.goto("/");
+  await page.getByRole("button", { name: /密信传递/ }).click();
+  await page.getByPlaceholder("输入要留言的文字密信...").fill(secretText);
+  const passcode = await page.locator("input").nth(0).inputValue();
+  await page.getByRole("button", { name: "生成密信" }).click();
+
+  await expect(page.getByText("密信已生成")).toBeVisible();
+  const shareText = await page.getByText(/https?:\/\/.*\/letter\?/).innerText();
+  const url = shareText.trim();
+
+  await page.goto(url);
+  await page.getByPlaceholder("输入发送者给你的阅读口令").fill(passcode);
+  await page.getByRole("button", { name: "点击查看并启动焚毁" }).click();
+  await expect(page.getByText(secretText)).toBeVisible();
+});
+
 test("refresh can restore an unburned encrypted message", async ({ browser }) => {
   const room = `test-room-refresh-${Date.now()}`;
   const passphrase = "test-pass-001";
@@ -61,7 +85,7 @@ test("refresh can restore an unburned encrypted message", async ({ browser }) =>
   const { contextA, contextB, pageA, pageB } = await joinTwoUsers(browser, room, passphrase);
 
   await pageA.getByPlaceholder("输入加密消息...").fill(secretText);
-  await pageA.getByRole("button", { name: /发送/ }).click();
+  await pageA.getByRole("button", { name: "发送", exact: true }).click();
   await expect(pageB.getByText(secretText)).toHaveCount(0);
   await expect(pageB.getByText("点击确认查看并启动倒计时")).toBeVisible();
 
@@ -89,7 +113,7 @@ test("received message does not start burn countdown until the receiver clicks i
   await expect(pageB.getByText("窗口已隐藏")).toBeVisible();
 
   await pageA.getByPlaceholder("输入加密消息...").fill(secretText);
-  await pageA.getByRole("button", { name: /发送/ }).click();
+  await pageA.getByRole("button", { name: "发送", exact: true }).click();
   await expect(pageA.getByText(/秒后焚毁/)).toHaveCount(0, { timeout: 3000 });
 
   await pageB.getByRole("button", { name: /恢复显示/ }).click();
@@ -114,7 +138,7 @@ test("visible peer message also waits for an explicit click before burning", asy
 
   await pageB.evaluate(() => window.dispatchEvent(new Event("blur")));
   await pageA.getByPlaceholder("输入加密消息...").fill(secretText);
-  await pageA.getByRole("button", { name: /发送/ }).click();
+  await pageA.getByRole("button", { name: "发送", exact: true }).click();
 
   await expect(pageB.getByText(secretText)).toHaveCount(0);
   await expect(pageB.getByText("点击确认查看并启动倒计时")).toBeVisible();
@@ -137,7 +161,7 @@ test("click reveal starts synced 5s burn countdown and deletes on both sides", a
 
   await pageA.getByRole("button", { name: "5s" }).click();
   await pageA.getByPlaceholder("输入加密消息...").fill(secretText);
-  await pageA.getByRole("button", { name: /发送/ }).click();
+  await pageA.getByRole("button", { name: "发送", exact: true }).click();
 
   await expect(pageA.getByText(secretText)).toBeVisible();
   await expect(pageB.getByText(secretText)).toHaveCount(0);
@@ -161,6 +185,31 @@ test("click reveal starts synced 5s burn countdown and deletes on both sides", a
   await expect(pageB.getByText(secretText)).toHaveCount(0, { timeout: 7000 });
   await expect(pageA.getByText(/秒后焚毁/)).toHaveCount(0);
   await expect(pageB.getByText(/秒后焚毁/)).toHaveCount(0);
+
+  await contextA.close();
+  await contextB.close();
+});
+
+test("image attachment stays hidden until click and then burns on both sides", async ({ browser }) => {
+  const room = `test-room-image-${Date.now()}`;
+  const passphrase = "test-pass-001";
+  const { contextA, contextB, pageA, pageB } = await joinTwoUsers(browser, room, passphrase);
+
+  await pageA.getByTestId("attachment-input").setInputFiles({
+    name: "secret-pixel.png",
+    mimeType: "image/png",
+    buffer: tinyPng
+  });
+
+  await expect(pageA.getByTestId("attachment-preview")).toBeVisible();
+  await expect(pageB.getByTestId("attachment-preview")).toHaveCount(0);
+  await expect(pageB.getByTestId("message-bubble")).toHaveCount(1);
+  await expect(pageA.getByTestId("burn-countdown")).toHaveCount(0, { timeout: 3000 });
+
+  await pageB.getByTestId("message-bubble").last().click();
+  await expect(pageB.getByTestId("attachment-preview")).toBeVisible();
+  await expect(pageA.getByTestId("burn-countdown")).toBeVisible();
+  await expect(pageB.getByTestId("burn-countdown")).toBeVisible();
 
   await contextA.close();
   await contextB.close();

@@ -43,7 +43,11 @@ export const bytesToHex = (bytes: ArrayBuffer | ArrayBufferView) =>
     .join("");
 
 export const base64UrlFromBytes = (bytes: ArrayBuffer | ArrayBufferView) => {
-  const binary = String.fromCharCode(...toUint8Array(bytes));
+  const source = toUint8Array(bytes);
+  let binary = "";
+  for (let offset = 0; offset < source.byteLength; offset += 32_768) {
+    binary += String.fromCharCode(...source.subarray(offset, offset + 32_768));
+  }
   return btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/u, "");
 };
 

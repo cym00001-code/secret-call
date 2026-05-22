@@ -13,7 +13,9 @@ module.exports = {
         ROOM_SUSPENDED_TTL_MS: "7200000",
         MESSAGE_TTL_MS: "7200000",
         BURNED_ID_TTL_MS: "7200000",
-        CLIENT_TIMEOUT_MS: "35000"
+        CLIENT_TIMEOUT_MS: "35000",
+        SECRET_ROOM_DATA_DIR: "/www/wwwroot/secret-room/data",
+        OFFLINE_SECRET_DB_PATH: "/www/wwwroot/secret-room/data/offline-secrets.sqlite"
       }
     },
     {

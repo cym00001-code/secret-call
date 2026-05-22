@@ -9,6 +9,8 @@ import {
   Clock,
   Eye,
   EyeOff,
+  ImagePlus,
+  KeyRound,
   Lock,
   Radio,
   Send,
@@ -17,22 +19,35 @@ import {
   X
 } from "lucide-react";
 import { useSecretRoom } from "@/hooks/useSecretRoom";
+import { OfflineSecretApp } from "@/components/OfflineSecretApp";
 import { burnOptions, type BurnAfterMs, type LocalMessage, type RoomState } from "@/types/protocol";
 
 type RoomController = ReturnType<typeof useSecretRoom>;
 
 export function SecretRoomApp() {
   const room = useSecretRoom();
+  const [surface, setSurface] = useState<"room" | "letter">(() => {
+    if (typeof window === "undefined") return "room";
+    return window.location.pathname.startsWith("/letter/") || window.location.search.includes("letter=") ? "letter" : "room";
+  });
 
   return (
     <main className="relative min-h-[100dvh] overflow-hidden bg-ink text-bright">
       <BackgroundEffect />
-      {room.roomState === "idle" || room.roomState === "joining" ? <JoinRoomForm room={room} /> : null}
-      {room.roomState === "waiting" ? <WaitingRoom room={room} /> : null}
-      {["active", "peer_offline", "suspended"].includes(room.roomState) ? <ChatRoom room={room} /> : null}
-      {room.roomState === "unavailable" ? <UnavailableRoom room={room} /> : null}
-      {room.roomState === "destroyed" ? <DestroyedRoom room={room} /> : null}
-      {room.roomState === "expired" ? <ExpiredRoom room={room} /> : null}
+      {surface === "letter" ? (
+        <OfflineSecretApp onBack={() => setSurface("room")} />
+      ) : (
+        <>
+          {room.roomState === "idle" || room.roomState === "joining" ? (
+            <JoinRoomForm room={room} onOpenLetter={() => setSurface("letter")} />
+          ) : null}
+          {room.roomState === "waiting" ? <WaitingRoom room={room} /> : null}
+          {["active", "peer_offline", "suspended"].includes(room.roomState) ? <ChatRoom room={room} /> : null}
+          {room.roomState === "unavailable" ? <UnavailableRoom room={room} /> : null}
+          {room.roomState === "destroyed" ? <DestroyedRoom room={room} /> : null}
+          {room.roomState === "expired" ? <ExpiredRoom room={room} /> : null}
+        </>
+      )}
     </main>
   );
 }
@@ -49,7 +64,7 @@ function BackgroundEffect() {
   );
 }
 
-function JoinRoomForm({ room }: { room: RoomController }) {
+function JoinRoomForm({ room, onOpenLetter }: { room: RoomController; onOpenLetter: () => void }) {
   const [roomNumber, setRoomNumber] = useState("");
   const [passphrase, setPassphrase] = useState("");
   const isJoining = room.roomState === "joining";
@@ -129,6 +144,15 @@ function JoinRoomForm({ room }: { room: RoomController }) {
             )}
           </button>
         </form>
+
+        <button
+          type="button"
+          onClick={onOpenLetter}
+          className="mt-4 flex w-full items-center justify-center gap-2 border border-brand/30 px-4 py-3 text-sm font-bold uppercase tracking-[2px] text-brand transition-colors hover:bg-brand/10"
+        >
+          <KeyRound className="size-4" />
+          密信传递
+        </button>
 
         {room.statusText ? <p className="mt-4 text-center text-xs text-dim">{room.statusText}</p> : null}
 
@@ -210,6 +234,7 @@ function WaitingRoom({ room }: { room: RoomController }) {
 
 function ChatRoom({ room }: { room: RoomController }) {
   const [inputText, setInputText] = useState("");
+  const fileInputRef = useRef<HTMLInputElement | null>(null);
   const [showDestroyDialog, setShowDestroyDialog] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const canSend = ["active", "peer_offline"].includes(room.roomState);
@@ -228,7 +253,7 @@ function ChatRoom({ room }: { room: RoomController }) {
             <div className="flex min-w-0 items-center gap-2">
               <span className={`size-1.5 shrink-0 ${room.roomState === "active" ? "animate-pulse bg-brand" : "bg-danger"}`} />
               <span className="truncate text-xs font-semibold uppercase tracking-[2px] text-brand">
-                {room.statusText || roomStatusLabel(room.roomState)}
+                {room.roomState === "active" ? roomStatusLabel(room.roomState) : room.statusText || roomStatusLabel(room.roomState)}
               </span>
             </div>
             <div className="flex shrink-0 items-center gap-2">
@@ -297,6 +322,29 @@ function ChatRoom({ room }: { room: RoomController }) {
               autoComplete="off"
               spellCheck={false}
             />
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept="image/*,video/*"
+              className="sr-only"
+              data-testid="attachment-input"
+              onChange={(event) => {
+                const file = event.target.files?.[0];
+                event.currentTarget.value = "";
+                if (file) void room.sendAttachmentMessage(file);
+              }}
+            />
+            <button
+              type="button"
+              disabled={!canSend}
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex min-h-10 shrink-0 items-center justify-center gap-1.5 border border-line px-3 text-xs font-semibold text-dim transition-colors hover:border-brand/50 hover:text-brand disabled:cursor-not-allowed disabled:opacity-30"
+              title="发送图片或视频"
+              aria-label="发送图片或视频"
+            >
+              <ImagePlus className="size-4" />
+              <span>图片/视频</span>
+            </button>
             <button
               type="submit"
               disabled={!inputText.trim() || !canSend}
@@ -307,9 +355,11 @@ function ChatRoom({ room }: { room: RoomController }) {
             </button>
           </form>
           <p className="mt-2 text-xs text-mute">
-            对方点击收到的消息后才开始倒计时，当前 {room.selectedBurnTime / 1000} 秒。
+            对方点击收到的消息后才开始倒计时，当前 {room.selectedBurnTime / 1000} 秒。图片/视频单个最多 4 MB。
           </p>
-          <p className="mt-1 text-xs text-danger/70">无法阻止屏幕截图或拍照，请在可信环境中使用。</p>
+          <p className="mt-1 text-xs text-danger/70">
+            网页端无法阻止屏幕截图或拍照；Android App 会启用系统级防截图保护。
+          </p>
         </div>
       </footer>
 
@@ -327,7 +377,7 @@ function ChatRoom({ room }: { room: RoomController }) {
 }
 
 function roomStatusLabel(state: RoomState) {
-  if (state === "active") return "双方在线";
+  if (state === "active") return "房间已封锁，双方在线";
   if (state === "peer_offline") return "对方已离线，房间仍保留";
   if (state === "suspended") return "房间暂时无人在线，可重新唤醒";
   return "等待另一端";
@@ -417,14 +467,33 @@ function MessageBubble({
   onConfirmSeen: (messageId: string) => boolean;
 }) {
   const isMe = message.from === "me";
+  if (message.from === "system") {
+    return (
+      <div className="flex justify-center">
+        <div className="max-w-[90%] border border-danger/20 bg-danger/5 px-3 py-2 text-center text-xs leading-relaxed text-danger/90">
+          {message.systemText}
+        </div>
+      </div>
+    );
+  }
+
   const canConfirmSeen =
     !isMe &&
-    Boolean(message.decryptedText) &&
+    Boolean(message.decryptedText || message.decryptedAttachment) &&
     !message.displayText &&
+    !message.displayAttachment &&
     ["delivered", "decrypted", "visible"].includes(message.status);
   const visibleText =
     message.displayText ??
-    (message.status === "undecryptable" ? "无法解密" : isMe ? "消息处理中" : "加密消息，点击查看");
+    (message.status === "undecryptable"
+      ? "无法解密"
+      : isMe
+        ? message.decryptedAttachment
+          ? "附件处理中"
+          : "消息处理中"
+        : message.decryptedAttachment
+          ? "加密附件，点击查看"
+          : "加密消息，点击查看");
   const timeLeft =
     message.status === "burning" && message.burnAt ? Math.max(0, message.burnAt - now) : undefined;
   const progress = timeLeft === undefined ? 0 : Math.max(0, Math.min(100, (timeLeft / message.burnAfterMs) * 100));
@@ -438,7 +507,7 @@ function MessageBubble({
         }}
         disabled={!canConfirmSeen}
         data-testid="message-bubble"
-        className={`max-w-[85%] border-l-2 bg-message px-4 py-3 sm:max-w-[80%] ${
+        className={`max-w-[85%] min-w-0 border-l-2 bg-message px-4 py-3 sm:max-w-[80%] ${
           isMe ? "border-brand" : "border-line"
         } ${canConfirmSeen ? "cursor-pointer text-left transition-colors hover:border-brand/70 hover:bg-panel focus:outline-none focus:ring-1 focus:ring-brand/60" : "cursor-default text-left"}`}
         aria-label={canConfirmSeen ? "确认查看消息并启动焚毁倒计时" : undefined}
@@ -446,7 +515,10 @@ function MessageBubble({
         <p className={`mb-1.5 text-xs font-semibold uppercase tracking-[2px] ${isMe ? "text-brand" : "text-dim"}`}>
           {isMe ? "你" : "对方"}
         </p>
-        <p className="break-words text-sm leading-relaxed text-bright">{visibleText}</p>
+        {message.displayAttachment ? <AttachmentPreview message={message} /> : null}
+        {message.displayText || !message.displayAttachment ? (
+          <p className="break-words text-sm leading-relaxed text-bright">{visibleText}</p>
+        ) : null}
         <MessageStatusLine message={message} {...(timeLeft !== undefined ? { timeLeft } : {})} />
         {message.status === "burning" && timeLeft !== undefined ? (
           <div className="mt-3 flex items-center gap-2">
@@ -461,6 +533,43 @@ function MessageBubble({
       </button>
     </div>
   );
+}
+
+function AttachmentPreview({ message }: { message: LocalMessage }) {
+  const attachment = message.displayAttachment;
+  if (!attachment) return null;
+
+  return (
+    <div className="mb-2 overflow-hidden border border-line/80 bg-ink/60" data-testid="attachment-preview">
+      {attachment.kind === "image" ? (
+        // eslint-disable-next-line @next/next/no-img-element
+        <img
+          src={attachment.objectUrl}
+          alt={attachment.name}
+          className="max-h-72 w-full max-w-sm object-contain"
+          draggable={false}
+        />
+      ) : (
+        <video
+          src={attachment.objectUrl}
+          controls
+          preload="metadata"
+          className="max-h-72 w-full max-w-sm bg-black"
+          aria-label={attachment.name}
+        />
+      )}
+      <div className="flex items-center justify-between gap-3 border-t border-line/80 px-3 py-2 text-xs text-mute">
+        <span className="min-w-0 truncate">{attachment.name}</span>
+        <span className="shrink-0">{formatBytes(attachment.size)}</span>
+      </div>
+    </div>
+  );
+}
+
+function formatBytes(bytes: number) {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.ceil(bytes / 1024)} KB`;
+  return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
 }
 
 function MessageStatusLine({ message, timeLeft }: { message: LocalMessage; timeLeft?: number }) {

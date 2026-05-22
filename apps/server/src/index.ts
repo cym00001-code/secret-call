@@ -14,6 +14,7 @@ import {
   getEventType,
   isRecord
 } from "./protocol.js";
+import { OfflineSecretStore, resolveOfflineSecretDbPath } from "./offlineSecrets.js";
 import { checkJoin, checkSend, createIpRiskHash } from "./rateLimit.js";
 
 type RoomLifecycleStatus = "waiting" | "active" | "peer_offline" | "suspended" | "destroyed" | "expired";
@@ -54,6 +55,10 @@ const suspendedRoomTtlMs = Number.parseInt(process.env.ROOM_SUSPENDED_TTL_MS ?? 
 const messageTtlMs = Number.parseInt(process.env.MESSAGE_TTL_MS ?? "7200000", 10);
 const burnedIdTtlMs = Number.parseInt(process.env.BURNED_ID_TTL_MS ?? "7200000", 10);
 const clientTimeoutMs = Number.parseInt(process.env.CLIENT_TIMEOUT_MS ?? "35000", 10);
+const maxCiphertextChars = Number.parseInt(process.env.MAX_CIPHERTEXT_CHARS ?? "7600000", 10);
+const maxClientEventBytes = Number.parseInt(process.env.MAX_CLIENT_EVENT_BYTES ?? "8200000", 10);
+const maxRoomPendingCiphertextChars = Number.parseInt(process.env.MAX_ROOM_PENDING_CIPHERTEXT_CHARS ?? "16000000", 10);
+const maxOfflineSecretCiphertextChars = Number.parseInt(process.env.MAX_OFFLINE_SECRET_CIPHERTEXT_CHARS ?? "2000000", 10);
 const disableRateLimit = process.env.DISABLE_RATE_LIMIT === "1";
 const ipHashSecret =
   process.env.IP_HASH_SECRET && process.env.IP_HASH_SECRET.length >= 32
@@ -72,6 +77,7 @@ const app = fastify({
 });
 
 const wss = new WebSocketServer({ noServer: true });
+const offlineSecrets = await OfflineSecretStore.open(resolveOfflineSecretDbPath());
 const rooms = new Map<string, RoomState>();
 const clients = new Set<ClientState>();
 
@@ -168,6 +174,54 @@ const isLegacyPublicKey = (value: unknown) => value === undefined || isSafeToken
 const isBurnAfter = (value: unknown): value is BurnAfterMs =>
   value === 5000 || value === 10000 || value === 30000 || value === 60000;
 
+const isOfflineUnreadTtlMs = (value: unknown) =>
+  value === 3_600_000 || value === 86_400_000 || value === 604_800_000;
+
+const isOfflineReadTtlMs = (value: unknown) =>
+  value === 5000 || value === 30000 || value === 60000;
+
+const isSafeCipherPart = (value: unknown, min: number, max: number) =>
+  typeof value === "string" &&
+  value.length >= min &&
+  value.length <= max &&
+  /^[A-Za-z0-9_-]+$/.test(value);
+
+const isSecurityEventKind = (value: unknown) =>
+  value === "screenshot" ||
+  value === "screen_recording_started" ||
+  value === "screen_recording_stopped" ||
+  value === "screen_projection";
+
+const isSecurityPlatform = (value: unknown) => value === "android" || value === "ios" || value === "web";
+
+const isOfflineSecretCreateBody = (
+  value: unknown
+): value is {
+  ciphertext: string;
+  iv: string;
+  aad: string;
+  salt: string;
+  kdfParams: string;
+  unreadTtlMs: number;
+  readTtlMs: number;
+} =>
+  isRecord(value) &&
+  isSafeCipherPart(value.ciphertext, 16, maxOfflineSecretCiphertextChars) &&
+  isSafeCipherPart(value.iv, 12, 64) &&
+  isSafeCipherPart(value.aad, 8, 512) &&
+  isSafeCipherPart(value.salt, 8, 128) &&
+  typeof value.kdfParams === "string" &&
+  value.kdfParams.length >= 4 &&
+  value.kdfParams.length <= 512 &&
+  /^[A-Za-z0-9_-]+$/.test(value.kdfParams) &&
+  isOfflineUnreadTtlMs(value.unreadTtlMs) &&
+  isOfflineReadTtlMs(value.readTtlMs);
+
+const isOfflineSecretOpenBody = (value: unknown): value is { readToken: string; readTtlMs: number } =>
+  isRecord(value) &&
+  isSafeToken(value.readToken, 24, 96) &&
+  isOfflineReadTtlMs(value.readTtlMs);
+
 const isClientCipherMessage = (value: unknown): value is ClientCipherMessage => {
   if (!isRecord(value)) return false;
   const hasValidBase =
@@ -176,7 +230,7 @@ const isClientCipherMessage = (value: unknown): value is ClientCipherMessage => 
     isSafeToken(value.iv, 12, 64) &&
     typeof value.ciphertext === "string" &&
     value.ciphertext.length > 0 &&
-    value.ciphertext.length <= 32_768 &&
+    value.ciphertext.length <= maxCiphertextChars &&
     /^[A-Za-z0-9_-]+$/.test(value.ciphertext) &&
     isBurnAfter(value.burnAfterMs) &&
     typeof value.createdAt === "number" &&
@@ -215,6 +269,9 @@ const toHistoryMessage = (message: PendingEncryptedMessage): HistoryMessage => (
   ...(typeof message.seenAt === "number" ? { seenAt: message.seenAt } : {}),
   ...(typeof message.burnAt === "number" ? { burnAt: message.burnAt } : {})
 });
+
+const roomPendingCiphertextChars = (room: RoomState) =>
+  [...room.pendingMessages.values()].reduce((total, message) => total + message.ciphertext.length, 0);
 
 const burnStoredMessage = (
   room: RoomState,
@@ -574,6 +631,20 @@ const handleSend = (client: ClientState, event: Extract<ClientEvent, { type: "me
     roomIdHash: event.roomIdHash,
     aad: "aad" in event.message ? event.message.aad : ""
   };
+  const roomCiphertextChars = roomPendingCiphertextChars(room);
+  const existing = room.pendingMessages.get(message.messageId);
+  const existingChars = existing?.ciphertext.length ?? 0;
+  if (roomCiphertextChars - existingChars + message.ciphertext.length > maxRoomPendingCiphertextChars) {
+    send(client, { type: "message:failed", messageId: message.messageId, reason: "rate_limited" });
+    logWs("message:send", {
+      roomIdHash: event.roomIdHash,
+      clientId: event.clientId,
+      messageId: message.messageId,
+      result: "limited",
+      errorType: "room-pending-bytes"
+    });
+    return;
+  }
   const pending: PendingEncryptedMessage = {
     ...message,
     expireAt: Math.min(now + messageTtlMs, room.expireAt),
@@ -743,6 +814,40 @@ const handleBurn = (client: ClientState, event: Extract<ClientEvent, { type: "me
   burnStoredMessage(room, event.messageId, message.burnAt, now, event.clientId, "deleted");
 };
 
+const handleSecurityEvent = (client: ClientState, event: Extract<ClientEvent, { type: "security:event" }>) => {
+  if (
+    !isRoomHash(event.roomIdHash) ||
+    !isSafeToken(event.clientId, 12, 96) ||
+    !isSecurityEventKind(event.kind) ||
+    !isSecurityPlatform(event.platform) ||
+    typeof event.blocked !== "boolean" ||
+    typeof event.detectedAt !== "number" ||
+    !Number.isFinite(event.detectedAt)
+  ) {
+    sendError(client);
+    return;
+  }
+
+  const room = getJoinedRoom(client, event.roomIdHash, event.clientId);
+  if (!room) return;
+  const serverTime = Date.now();
+  broadcast(room, {
+    type: "security:event",
+    kind: event.kind,
+    platform: event.platform,
+    blocked: event.blocked,
+    detectedAt: event.detectedAt,
+    byClientId: event.clientId,
+    serverTime
+  });
+  logWs("security:event", {
+    roomIdHash: event.roomIdHash,
+    clientId: event.clientId,
+    result: event.blocked ? "blocked" : "detected",
+    errorType: `${event.platform}:${event.kind}`
+  });
+};
+
 const handleDestroy = (client: ClientState, event: Extract<ClientEvent, { type: "room:destroy" }>) => {
   if (!isRoomHash(event.roomIdHash) || !isSafeToken(event.clientId, 12, 96)) {
     send(client, { type: "room:unavailable" });
@@ -767,7 +872,7 @@ const parseClientEvent = (data: RawData): ClientEvent | undefined => {
         ? Buffer.from(data).toString("utf8")
         : Buffer.from(data).toString("utf8");
 
-  if (Buffer.byteLength(text, "utf8") > 40_000) return undefined;
+  if (Buffer.byteLength(text, "utf8") > maxClientEventBytes) return undefined;
   try {
     const parsed: unknown = JSON.parse(text);
     if (!isRecord(parsed) || typeof parsed.type !== "string") return undefined;
@@ -831,6 +936,9 @@ wss.on("connection", (ws, request) => {
       case "message:burn":
         handleBurn(client, event);
         break;
+      case "security:event":
+        handleSecurityEvent(client, event);
+        break;
       case "ping":
         send(client, {
           type: "pong",
@@ -885,6 +993,8 @@ setInterval(() => {
       expireRoom(room, "expired");
     }
   }
+
+  offlineSecrets.cleanupExpired(now);
 }, 10_000).unref();
 
 app.get("/health", async () => ({
@@ -898,6 +1008,46 @@ app.get("/", async () => ({
   name: "secret-room-server",
   ok: true
 }));
+
+app.post("/api/offline-secrets", async (request, reply) => {
+  if (!isOfflineSecretCreateBody(request.body)) {
+    return reply.code(400).send({ error: "invalid" });
+  }
+
+  const created = offlineSecrets.create(request.body);
+  return reply.send(created);
+});
+
+app.get("/api/offline-secrets/:secretId/meta", async (request, reply) => {
+  const params = request.params;
+  const secretId = isRecord(params) && typeof params.secretId === "string" ? params.secretId : "";
+  const meta = offlineSecrets.getMeta(secretId);
+  if (!meta || meta.status === "expired" || meta.status === "burned") {
+    return reply.code(404).send({ error: "not_found" });
+  }
+  return reply.send(meta);
+});
+
+app.post("/api/offline-secrets/:secretId/open", async (request, reply) => {
+  const params = request.params;
+  const secretId = isRecord(params) && typeof params.secretId === "string" ? params.secretId : "";
+  if (!isOfflineSecretOpenBody(request.body)) {
+    return reply.code(400).send({ error: "invalid" });
+  }
+
+  const opened = offlineSecrets.openSecret(secretId, request.body.readToken, request.body.readTtlMs);
+  if (!opened) {
+    return reply.code(404).send({ error: "not_found" });
+  }
+  return reply.send(opened);
+});
+
+app.post("/api/offline-secrets/:secretId/burn", async (request, reply) => {
+  const params = request.params;
+  const secretId = isRecord(params) && typeof params.secretId === "string" ? params.secretId : "";
+  offlineSecrets.burn(secretId);
+  return reply.send({ ok: true });
+});
 
 app.server.on("upgrade", (request, socket, head) => {
   const url = new URL(request.url ?? "/", "http://localhost");

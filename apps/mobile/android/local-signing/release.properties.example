@@ -1,0 +1,4 @@
+storeFile=local-signing/secret-room-release.jks
+storePassword=change-me
+keyAlias=secret-room-release
+keyPassword=change-me

@@ -1,7 +1,7 @@
 {
   "name": "@secret-room/mobile",
   "private": true,
-  "version": "0.1.0",
+  "version": "0.1.1",
   "type": "module",
   "scripts": {
     "build:web": "cross-env CAPACITOR_EXPORT=1 NEXT_PUBLIC_API_BASE_URL=https://8.138.150.200 NEXT_PUBLIC_WS_URL=wss://8.138.150.200/ws pnpm --filter @secret-room/web build",

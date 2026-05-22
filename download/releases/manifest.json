@@ -1,12 +1,13 @@
 {
   "android": {
     "available": true,
-    "version": "0.1.0",
-    "updatedAt": "2026-05-22 20:21:09 +08:00",
-    "size": "3.28 MB",
-    "sha256": "2e6b4baefc2940ebd01d5029e608a583b958c955f8c0330a3504b913918bb69d",
-    "url": "/download/releases/SecretRoom-0.1.0.apk",
-    "notes": "Android 首版 APK：本地打包 Secret Room，敏感页面启用系统级防截图/录屏保护，支持双人密聊、图片/视频会话消息和离线密信。"
+    "version": "0.1.1",
+    "updatedAt": "2026-05-22 21:15:40 +08:00",
+    "size": "4.21 MB",
+    "bytes": 4417504,
+    "sha256": "7f63df229bc673f77f598d3263938a70df23482cc963c6a36436b969a4649d38",
+    "url": "/download/releases/SecretRoom-0.1.1.apk",
+    "notes": "Android APK：更新应用图标，修复手机下载页可能保存为 4 KB 网页文件的问题，保留防截图/录屏、双人密聊、图片/视频消息和离线密信能力。"
   },
   "ios": {
     "available": false,

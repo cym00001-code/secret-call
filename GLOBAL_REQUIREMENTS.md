@@ -71,6 +71,28 @@ iOS 端：
 
 除非用户明确要求跳过，否则不要只本地修改而不说明未发布状态。
 
+固定 Android 发布入口：
+
+```powershell
+.\scripts\release-android.ps1
+```
+
+脚本职责：
+
+- 构建网页静态资源并同步到 Capacitor。
+- 构建已签名 Android release APK。
+- 校验 APK 签名、zip 对齐、大小和 SHA256。
+- 更新 `download/releases/manifest.json`。
+- 上传下载页、图标、manifest 和 APK 到服务器下载目录。
+- 下载公网 APK 并校验 SHA256。
+
+签名要求：
+
+- 签名文件和密码只放在 `apps/mobile/android/local-signing/`。
+- `local-signing/` 不提交 Git。
+- 只提交 `release.properties.example` 作为模板。
+- 发布脚本不得把签名密码写入日志或提交文件。
+
 ## Git 要求
 
 每个可用版本都必须同步到 Git 仓库。

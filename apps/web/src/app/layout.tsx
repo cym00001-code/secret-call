@@ -3,7 +3,11 @@ import "./globals.css";
 
 export const metadata: Metadata = {
   title: "Secret Room",
-  description: "无账号双人临时密聊房间"
+  description: "无账号双人临时密聊房间",
+  icons: {
+    icon: "/app-icon.png",
+    apple: "/apple-touch-icon.png"
+  }
 };
 
 export const viewport: Viewport = {

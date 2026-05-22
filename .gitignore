@@ -6,6 +6,7 @@ test-results
 playwright-report
 data
 apps/web/out
+download/releases/*.apk
 apps/mobile/android/.gradle
 apps/mobile/android/build
 apps/mobile/android/app/build

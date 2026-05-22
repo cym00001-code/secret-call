@@ -7,108 +7,572 @@
     <style>
       :root {
         color-scheme: dark;
-        background: #050505;
-        color: #e0e0e0;
-        font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+        --bg: #050607;
+        --panel: #0d1110;
+        --panel-strong: #141613;
+        --line: rgba(223, 194, 137, 0.24);
+        --line-soft: rgba(255, 255, 255, 0.08);
+        --text: #f4efe5;
+        --muted: #b8ad9a;
+        --dim: #786f61;
+        --gold: #dfbd77;
+        --gold-strong: #ffe0a0;
+        --green: #42d49d;
+        --warn: #ffcf70;
+        --danger: #ff867c;
+        font-family:
+          Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont,
+          "Segoe UI", "Microsoft YaHei", sans-serif;
       }
-      * { box-sizing: border-box; }
+
+      * {
+        box-sizing: border-box;
+      }
+
       body {
         margin: 0;
         min-height: 100vh;
-        display: grid;
-        place-items: center;
-        padding: 24px;
+        color: var(--text);
         background:
-          linear-gradient(90deg, rgba(0, 143, 122, 0.06) 1px, transparent 1px),
-          linear-gradient(180deg, rgba(0, 143, 122, 0.04) 1px, transparent 1px),
-          #050505;
-        background-size: 42px 42px;
+          linear-gradient(90deg, rgba(223, 189, 119, 0.08) 1px, transparent 1px),
+          linear-gradient(180deg, rgba(255, 255, 255, 0.04) 1px, transparent 1px),
+          radial-gradient(circle at 70% -10%, rgba(223, 189, 119, 0.16), transparent 32%),
+          var(--bg);
+        background-size: 48px 48px, 48px 48px, auto, auto;
       }
-      main {
-        width: min(680px, 100%);
-        border: 1px solid #222;
-        background: rgba(10, 10, 10, 0.94);
+
+      a,
+      button {
+        font: inherit;
       }
-      header, section { padding: 24px; border-bottom: 1px solid #222; }
-      section:last-child { border-bottom: 0; }
-      h1 { margin: 0 0 8px; font-size: 26px; }
-      h2 { margin: 0 0 14px; font-size: 16px; color: #008f7a; letter-spacing: 1px; text-transform: uppercase; }
-      p { margin: 0; color: #888; line-height: 1.75; font-size: 14px; }
-      dl { display: grid; grid-template-columns: 120px 1fr; gap: 12px; margin: 0; font-size: 13px; }
-      dt { color: #444; }
-      dd { margin: 0; color: #e0e0e0; overflow-wrap: anywhere; }
-      a.button {
+
+      .page {
+        width: min(1120px, calc(100% - 32px));
+        margin: 0 auto;
+        padding: 28px 0 40px;
+      }
+
+      .topbar,
+      .brand,
+      .status,
+      .actions {
+        display: flex;
+        align-items: center;
+      }
+
+      .topbar {
+        justify-content: space-between;
+        gap: 16px;
+        padding: 12px 0 24px;
+      }
+
+      .brand {
+        gap: 12px;
+        min-width: 0;
+      }
+
+      .brand img {
+        width: 42px;
+        height: 42px;
+        border-radius: 10px;
+        box-shadow: 0 12px 28px rgba(0, 0, 0, 0.34);
+      }
+
+      .brand strong,
+      .brand span {
+        display: block;
+        line-height: 1.35;
+      }
+
+      .brand strong {
+        font-size: 15px;
+      }
+
+      .brand span {
+        color: var(--muted);
+        font-size: 12px;
+      }
+
+      .status {
+        gap: 8px;
+        min-height: 34px;
+        padding: 0 12px;
+        border: 1px solid rgba(66, 212, 157, 0.25);
+        background: rgba(66, 212, 157, 0.08);
+        color: var(--green);
+        font-size: 12px;
+        white-space: nowrap;
+      }
+
+      .status::before {
+        content: "";
+        width: 7px;
+        height: 7px;
+        border-radius: 999px;
+        background: currentColor;
+      }
+
+      .hero {
+        display: grid;
+        grid-template-columns: minmax(0, 1.04fr) minmax(300px, 0.74fr);
+        gap: 24px;
+      }
+
+      .panel {
+        border: 1px solid var(--line);
+        background: rgba(13, 17, 16, 0.92);
+        box-shadow: 0 24px 70px rgba(0, 0, 0, 0.34);
+      }
+
+      .hero-copy {
+        display: flex;
+        min-height: 430px;
+        flex-direction: column;
+        justify-content: space-between;
+        padding: clamp(24px, 4vw, 44px);
+      }
+
+      h1 {
+        max-width: 680px;
+        margin: 0;
+        font-size: clamp(36px, 6vw, 76px);
+        font-weight: 850;
+        line-height: 0.98;
+        letter-spacing: 0;
+      }
+
+      .lead {
+        max-width: 620px;
+        margin: 18px 0 0;
+        color: #c7ba9f;
+        font-size: clamp(15px, 2vw, 18px);
+        line-height: 1.85;
+      }
+
+      .actions {
+        flex-wrap: wrap;
+        gap: 12px;
+        margin-top: 30px;
+      }
+
+      .button,
+      .ghost,
+      .copy {
         display: inline-flex;
         align-items: center;
         justify-content: center;
-        min-height: 44px;
-        width: 100%;
-        margin-top: 18px;
-        background: #008f7a;
-        color: #050505;
+        min-height: 48px;
+        border: 1px solid transparent;
         text-decoration: none;
-        font-weight: 800;
-        letter-spacing: 1px;
+        cursor: pointer;
       }
-      .disabled {
+
+      .button {
+        min-width: min(100%, 260px);
+        padding: 0 20px;
+        background: var(--gold);
+        color: #130f08;
+        font-weight: 850;
+      }
+
+      .button:hover,
+      .button:focus-visible {
+        background: var(--gold-strong);
+        outline: none;
+      }
+
+      .ghost,
+      .copy {
+        border-color: rgba(255, 255, 255, 0.14);
+        background: rgba(255, 255, 255, 0.035);
+        color: var(--text);
+      }
+
+      .ghost {
+        padding: 0 16px;
+      }
+
+      .copy {
+        min-height: 40px;
+        padding: 0 13px;
+      }
+
+      .ghost:hover,
+      .ghost:focus-visible,
+      .copy:hover,
+      .copy:focus-visible {
+        border-color: rgba(223, 189, 119, 0.58);
+        outline: none;
+      }
+
+      .warning {
+        margin-top: 16px;
+        color: var(--warn);
+        font-size: 13px;
+        line-height: 1.75;
+      }
+
+      .facts {
         display: grid;
-        place-items: center;
-        min-height: 44px;
-        width: 100%;
-        margin-top: 18px;
-        border: 1px solid rgba(217, 83, 79, 0.42);
-        color: #d9534f;
+        grid-template-columns: repeat(3, minmax(0, 1fr));
+        gap: 10px;
+        margin-top: 28px;
       }
-      .note { color: #d9534f; font-size: 12px; }
-      code { color: #008f7a; }
+
+      .fact {
+        min-height: 88px;
+        padding: 14px;
+        border: 1px solid var(--line-soft);
+        background: rgba(255, 255, 255, 0.03);
+      }
+
+      .fact span {
+        display: block;
+        color: var(--dim);
+        font-size: 12px;
+      }
+
+      .fact strong {
+        display: block;
+        margin-top: 8px;
+        font-size: 15px;
+        line-height: 1.45;
+      }
+
+      .app-preview {
+        display: grid;
+        min-height: 430px;
+        padding: 28px;
+        place-items: center;
+      }
+
+      .app-card {
+        width: min(100%, 300px);
+        padding: 18px;
+        border: 1px solid rgba(223, 189, 119, 0.26);
+        background: linear-gradient(180deg, rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.02));
+      }
+
+      .app-card img {
+        display: block;
+        width: 100%;
+        border-radius: 26px;
+        box-shadow: 0 22px 50px rgba(0, 0, 0, 0.36);
+      }
+
+      .app-card p {
+        margin: 16px 0 0;
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.75;
+      }
+
+      .section {
+        margin-top: 24px;
+      }
+
+      .grid {
+        display: grid;
+        grid-template-columns: minmax(0, 0.95fr) minmax(280px, 0.7fr);
+        gap: 24px;
+      }
+
+      .release,
+      .checks {
+        padding: 24px;
+      }
+
+      h2 {
+        margin: 0 0 18px;
+        color: var(--gold-strong);
+        font-size: 15px;
+      }
+
+      dl {
+        display: grid;
+        grid-template-columns: 110px minmax(0, 1fr);
+        gap: 13px 16px;
+        margin: 0;
+        font-size: 14px;
+      }
+
+      dt {
+        color: var(--dim);
+      }
+
+      dd {
+        min-width: 0;
+        margin: 0;
+        overflow-wrap: anywhere;
+      }
+
+      .mono {
+        font-family: "Cascadia Code", Consolas, ui-monospace, monospace;
+        font-size: 12px;
+        line-height: 1.65;
+      }
+
+      .copy-row {
+        display: flex;
+        flex-wrap: wrap;
+        gap: 12px;
+        align-items: center;
+        margin-top: 18px;
+      }
+
+      .hint {
+        color: var(--muted);
+        font-size: 13px;
+        line-height: 1.75;
+      }
+
+      .check-list {
+        display: grid;
+        gap: 12px;
+        margin: 0;
+        padding: 0;
+        list-style: none;
+      }
+
+      .check-list li {
+        display: grid;
+        grid-template-columns: 24px minmax(0, 1fr);
+        gap: 10px;
+        color: #d5c9b0;
+        font-size: 14px;
+        line-height: 1.65;
+      }
+
+      .check-list b {
+        color: var(--gold-strong);
+        font-family: "Cascadia Code", Consolas, monospace;
+        font-size: 12px;
+      }
+
+      .danger {
+        color: var(--danger);
+      }
+
+      .footer {
+        margin-top: 24px;
+        color: var(--dim);
+        font-size: 12px;
+        line-height: 1.7;
+      }
+
+      @media (max-width: 820px) {
+        .page {
+          width: min(100% - 24px, 620px);
+          padding-top: 18px;
+        }
+
+        .topbar,
+        .hero,
+        .grid {
+          display: grid;
+          grid-template-columns: 1fr;
+        }
+
+        .hero-copy,
+        .app-preview {
+          min-height: auto;
+        }
+
+        .facts {
+          grid-template-columns: 1fr;
+        }
+
+        .button,
+        .ghost {
+          width: 100%;
+        }
+
+        dl {
+          grid-template-columns: 88px minmax(0, 1fr);
+        }
+      }
     </style>
   </head>
   <body>
-    <main>
-      <header>
-        <h1>Secret Room</h1>
-        <p>Android 安装包下载页。每次正式发布后，这里会同步最新版本、文件大小、SHA256 和更新说明。</p>
+    <main class="page">
+      <header class="topbar">
+        <div class="brand">
+          <img src="/download/assets/app-icon.png" alt="" />
+          <div>
+            <strong>Secret Room</strong>
+            <span>Android APK 发布页</span>
+          </div>
+        </div>
+        <div class="status" id="statusText">当前 APK 可下载</div>
       </header>
-      <section>
-        <h2>当前版本</h2>
-        <dl>
-          <dt>平台</dt>
-          <dd id="platform">Android</dd>
-          <dt>版本</dt>
-          <dd id="version">暂未发布 APK</dd>
-          <dt>更新时间</dt>
-          <dd id="updatedAt">-</dd>
-          <dt>文件大小</dt>
-          <dd id="size">-</dd>
-          <dt>SHA256</dt>
-          <dd id="sha256">-</dd>
-        </dl>
-        <div id="downloadArea" class="disabled">Android APK 暂未发布</div>
+
+      <section class="hero" aria-labelledby="title">
+        <div class="panel hero-copy">
+          <div>
+            <h1 id="title">Secret Room Android</h1>
+            <p class="lead">
+              本地打包安装包。敏感页面启用 Android 系统级防截图/录屏保护，继续支持双人密聊、图片/视频消息和离线密信。
+            </p>
+            <div class="actions">
+              <a
+                class="button"
+                id="primaryDownload"
+                href="/download/releases/SecretRoom-0.1.1.apk"
+                download="SecretRoom-0.1.1.apk"
+                type="application/vnd.android.package-archive"
+              >
+                下载 Android APK
+              </a>
+              <a
+                class="ghost"
+                id="directDownload"
+                href="/download/releases/SecretRoom-0.1.1.apk"
+                type="application/vnd.android.package-archive"
+              >
+                备用直链
+              </a>
+            </div>
+            <p class="warning">
+              正确文件名应为 <span class="mono">SecretRoom-0.1.1.apk</span>，大小约 3 MB。
+              如果手机里出现约 4 KB 的文件，那是网页文件，请删除后点上方 APK 按钮重新下载。
+            </p>
+          </div>
+
+          <div class="facts">
+            <div class="fact">
+              <span>平台</span>
+              <strong>Android 6.0 及以上</strong>
+            </div>
+            <div class="fact">
+              <span>当前版本</span>
+              <strong id="heroVersion">0.1.1</strong>
+            </div>
+            <div class="fact">
+              <span>文件大小</span>
+              <strong id="heroSize">发布中</strong>
+            </div>
+          </div>
+        </div>
+
+        <aside class="panel app-preview" aria-label="Secret Room 应用图标">
+          <div class="app-card">
+            <img src="/download/assets/app-icon.png" alt="Secret Room 应用图标" />
+            <p>新图标已作为 Secret Room 的统一应用图标，后续 Android、iOS 和下载页都会沿用。</p>
+          </div>
+        </aside>
       </section>
-      <section>
-        <h2>说明</h2>
-        <p id="notes">第一版 App 正在构建中。Android 会启用系统级防截图保护；iOS 只能检测截图并提醒，不能阻止系统截图。</p>
-        <p class="note">请只从 <code>https://8.138.150.200/download</code> 下载安装包。</p>
+
+      <section class="section grid">
+        <div class="panel release">
+          <h2>当前版本</h2>
+          <dl>
+            <dt>平台</dt>
+            <dd>Android</dd>
+            <dt>包名</dt>
+            <dd class="mono">com.secretroom.app</dd>
+            <dt>版本</dt>
+            <dd id="version">0.1.1</dd>
+            <dt>更新时间</dt>
+            <dd id="updatedAt">同步中</dd>
+            <dt>文件大小</dt>
+            <dd id="size">同步中</dd>
+            <dt>SHA256</dt>
+            <dd class="mono" id="sha256">同步中</dd>
+          </dl>
+          <div class="copy-row">
+            <button class="copy" id="copySha" type="button">复制 SHA256</button>
+            <span class="hint" id="copyState" role="status"></span>
+          </div>
+        </div>
+
+        <div class="panel checks">
+          <h2>下载检查</h2>
+          <ul class="check-list">
+            <li><b>01</b><span>下载后文件名应以 <span class="mono">.apk</span> 结尾。</span></li>
+            <li><b>02</b><span>文件大小应是数 MB；4 KB 左右不是安装包。</span></li>
+            <li><b>03</b><span>Android 5.x 或更旧系统无法安装当前版本。</span></li>
+            <li><b>04</b><span class="danger">iOS 不能系统级阻止截图，后续版本只做检测和提醒。</span></li>
+          </ul>
+        </div>
       </section>
+
+      <section class="section panel release">
+        <h2>更新说明</h2>
+        <p class="hint" id="notes">
+          Android APK：更新应用图标，修复手机下载页可能保存为 4 KB 网页文件的问题，保留防截图/录屏、双人密聊、图片/视频消息和离线密信能力。
+        </p>
+        <p class="hint" style="margin-top: 12px">
+          固定下载地址：
+          <a class="mono" id="directUrlText" href="/download/releases/SecretRoom-0.1.1.apk">/download/releases/SecretRoom-0.1.1.apk</a>
+        </p>
+      </section>
+
+      <footer class="footer">
+        仅从当前页面下载安装包。发布新版本时，这里会同步版本号、文件大小、SHA256 与更新说明。
+      </footer>
     </main>
+
     <script>
+      const fallback = {
+        version: "0.1.1",
+        updatedAt: "同步中",
+        size: "同步中",
+        sha256: "同步中",
+        url: "/download/releases/SecretRoom-0.1.1.apk",
+        notes:
+          "Android APK：更新应用图标，修复手机下载页可能保存为 4 KB 网页文件的问题，保留防截图/录屏、双人密聊、图片/视频消息和离线密信能力。"
+      };
+
+      function absoluteUrl(path) {
+        return new URL(path, window.location.origin).toString();
+      }
+
+      function render(android) {
+        const release = { ...fallback, ...android };
+        const fileName = release.url.split("/").pop() || "SecretRoom.apk";
+        document.getElementById("heroVersion").textContent = release.version;
+        document.getElementById("heroSize").textContent = release.size;
+        document.getElementById("version").textContent = release.version;
+        document.getElementById("updatedAt").textContent = release.updatedAt;
+        document.getElementById("size").textContent = release.bytes
+          ? `${release.size} / ${Number(release.bytes).toLocaleString("zh-CN")} 字节`
+          : release.size;
+        document.getElementById("sha256").textContent = release.sha256;
+        document.getElementById("notes").textContent = release.notes;
+        document.getElementById("directUrlText").textContent = absoluteUrl(release.url);
+
+        for (const id of ["primaryDownload", "directDownload", "directUrlText"]) {
+          const link = document.getElementById(id);
+          link.href = release.url;
+          link.setAttribute("type", "application/vnd.android.package-archive");
+          if (id === "primaryDownload") link.setAttribute("download", fileName);
+        }
+      }
+
       fetch("/download/releases/manifest.json", { cache: "no-store" })
         .then((response) => (response.ok ? response.json() : null))
         .then((manifest) => {
-          if (!manifest || !manifest.android || !manifest.android.available) return;
-          const android = manifest.android;
-          document.getElementById("version").textContent = android.version;
-          document.getElementById("updatedAt").textContent = android.updatedAt;
-          document.getElementById("size").textContent = android.size;
-          document.getElementById("sha256").textContent = android.sha256;
-          document.getElementById("notes").textContent = android.notes;
-          const link = document.createElement("a");
-          link.href = android.url;
-          link.className = "button";
-          link.textContent = "下载 Android APK";
-          document.getElementById("downloadArea").replaceWith(link);
+          if (manifest?.android?.available) {
+            render(manifest.android);
+            return;
+          }
+          document.getElementById("statusText").textContent = "清单同步中，直链可用";
+          render(fallback);
         })
-        .catch(() => {});
+        .catch(() => {
+          document.getElementById("statusText").textContent = "清单同步中，直链可用";
+          render(fallback);
+        });
+
+      document.getElementById("copySha").addEventListener("click", async () => {
+        const value = document.getElementById("sha256").textContent.trim();
+        try {
+          await navigator.clipboard.writeText(value);
+          document.getElementById("copyState").textContent = "已复制";
+        } catch {
+          document.getElementById("copyState").textContent = "请手动选择上方 SHA256";
+        }
+      });
     </script>
   </body>
 </html>

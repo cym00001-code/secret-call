@@ -24,7 +24,9 @@ export default defineConfig({
   webServer: {
     command: "pnpm dev",
     env: {
-      DISABLE_RATE_LIMIT: "1"
+      DISABLE_RATE_LIMIT: "1",
+      SECRET_ROOM_SQLITE_ADAPTER: "cli",
+      OFFLINE_SECRET_DB_PATH: "C:/Windows/Temp/secret-room-e2e/offline-secrets.sqlite"
     },
     url: "http://127.0.0.1:3100",
     reuseExistingServer: false,

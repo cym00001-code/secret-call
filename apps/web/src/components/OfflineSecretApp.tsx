@@ -262,7 +262,7 @@ function ReadOfflineSecret({ secretId, readToken }: { secretId: string; readToke
   };
 
   const handleBurn = async () => {
-    await postJson(`/api/offline-secrets/${secretId}/burn`, {});
+    await postJson(`/api/offline-secrets/${secretId}/burn`, { readToken });
     setPlaintext("");
     setOpened(null);
     setMeta((current) => (current ? { ...current, status: "burned", burnedAt: Date.now() } : current));

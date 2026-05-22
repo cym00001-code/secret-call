@@ -93,6 +93,28 @@ const sqlString = (value: unknown) => {
 const applyParams = (sql: string, params: Record<string, unknown> = {}) =>
   sql.replace(/@([A-Za-z0-9_]+)/gu, (match, key) => (Object.hasOwn(params, key) ? sqlString(params[key]) : match));
 
+const sqliteCliNull = "__SRNULL__";
+
+const parseSqliteCliRows = (output: string): Array<Record<string, unknown>> => {
+  const lines = output.replace(/\r\n/gu, "\n").replace(/\r/gu, "\n").split("\n");
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  if (lines.length <= 1) return [];
+
+  const headerLine = lines.shift();
+  if (!headerLine) return [];
+
+  const headers = headerLine.split("\t");
+  return lines.map((line) => {
+    const values = line.split("\t");
+    return Object.fromEntries(
+      headers.map((header, index) => {
+        const value = values[index];
+        return [header, value === sqliteCliNull || value === undefined ? null : value];
+      })
+    );
+  });
+};
+
 class CliSqliteAdapter implements SqliteAdapter {
   constructor(private readonly dbPath: string) {}
 
@@ -105,11 +127,14 @@ class CliSqliteAdapter implements SqliteAdapter {
   }
 
   all<T extends Record<string, unknown>>(sql: string, params: Record<string, unknown> = {}) {
-    const jsonSql = `.mode json\n${applyParams(sql, params)}`;
-    const output = this.runRaw(jsonSql);
-    const trimmed = output.trim();
-    if (!trimmed) return [];
-    return JSON.parse(trimmed) as T[];
+    const rowsSql = [
+      ".bail on",
+      ".headers on",
+      ".mode tabs",
+      `.nullvalue ${sqliteCliNull}`,
+      applyParams(sql, params)
+    ].join("\n");
+    return parseSqliteCliRows(this.runRaw(rowsSql)) as T[];
   }
 
   run(sql: string, params: Record<string, unknown> = {}) {
@@ -162,6 +187,10 @@ class NodeSqliteAdapter implements SqliteAdapter {
 }
 
 const createSqliteAdapter = async (dbPath: string): Promise<SqliteAdapter> => {
+  if (process.env.SECRET_ROOM_SQLITE_ADAPTER === "cli") {
+    return new CliSqliteAdapter(dbPath);
+  }
+
   try {
     const sqlite = await import("node:sqlite");
     if ("DatabaseSync" in sqlite) {
@@ -314,16 +343,29 @@ export class OfflineSecretStore {
     );
   }
 
+  burnWithToken(secretId: string, readToken: string, at = nowMs()) {
+    const row = this.find(secretId);
+    if (!row) return false;
+    const current = this.expireIfNeeded(row, at);
+    if (current.status === "expired" || current.status === "burned") return false;
+    if (!safeCompare(current.read_token_hash, hashToken(readToken))) return false;
+    this.burn(secretId, at, "burned");
+    return true;
+  }
+
   cleanupExpired(at = nowMs()) {
-    const rows = this.db.all<Record<string, unknown>>(
-      `SELECT * FROM offline_secrets
-       WHERE status IN ('stored', 'reading')
-       AND (unread_expire_at <= @now OR (read_expire_at IS NOT NULL AND read_expire_at <= @now));`,
+    this.db.run(
+      `UPDATE offline_secrets
+       SET ciphertext = '', iv = '', aad = '', burned_at = @now, status = 'expired'
+       WHERE status = 'stored' AND unread_expire_at <= @now;`,
       { now: at }
     );
-    for (const row of rows) {
-      this.expireIfNeeded(normalizeRow(row), at);
-    }
+    this.db.run(
+      `UPDATE offline_secrets
+       SET ciphertext = '', iv = '', aad = '', burned_at = @now, status = 'expired'
+       WHERE status = 'reading' AND read_expire_at IS NOT NULL AND read_expire_at <= @now;`,
+      { now: at }
+    );
   }
 
   private migrate() {

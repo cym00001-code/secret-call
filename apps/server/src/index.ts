@@ -222,6 +222,9 @@ const isOfflineSecretOpenBody = (value: unknown): value is { readToken: string; 
   isSafeToken(value.readToken, 24, 96) &&
   isOfflineReadTtlMs(value.readTtlMs);
 
+const isOfflineSecretBurnBody = (value: unknown): value is { readToken: string } =>
+  isRecord(value) && isSafeToken(value.readToken, 24, 96);
+
 const isClientCipherMessage = (value: unknown): value is ClientCipherMessage => {
   if (!isRecord(value)) return false;
   const hasValidBase =
@@ -1045,7 +1048,12 @@ app.post("/api/offline-secrets/:secretId/open", async (request, reply) => {
 app.post("/api/offline-secrets/:secretId/burn", async (request, reply) => {
   const params = request.params;
   const secretId = isRecord(params) && typeof params.secretId === "string" ? params.secretId : "";
-  offlineSecrets.burn(secretId);
+  if (!isOfflineSecretBurnBody(request.body)) {
+    return reply.code(400).send({ error: "invalid" });
+  }
+  if (!offlineSecrets.burnWithToken(secretId, request.body.readToken)) {
+    return reply.code(404).send({ error: "not_found" });
+  }
   return reply.send({ ok: true });
 });
 

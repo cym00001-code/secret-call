@@ -11,11 +11,11 @@
     "typecheck": "pnpm -r typecheck",
     "lint": "eslint . --max-warnings=0",
     "test:e2e": "playwright test",
+    "release:android": "powershell -ExecutionPolicy Bypass -File scripts/release-android.ps1",
     "start:web": "pnpm --filter @secret-room/web start",
     "start:server": "pnpm --filter @secret-room/server start"
   },
   "devDependencies": {
-    "@playwright/test": "^1.60.0",
     "@eslint/js": "^9.39.1",
     "@next/eslint-plugin-next": "^15.5.6",
     "@playwright/test": "^1.60.0",

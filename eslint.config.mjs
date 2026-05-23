@@ -11,6 +11,7 @@ export default [
       "**/dist/**",
       "**/out/**",
       "**/data/**",
+      "references/**",
       "**/test-results/**",
       "apps/mobile/android/app/build/**",
       "apps/mobile/android/build/**",

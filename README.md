@@ -2,6 +2,16 @@
 
 无账号双人密聊网站 MVP V2。两个人输入相同房间号和房间口令后，会进入同一个临时房间。服务端不接触明文，不保存口令和密钥，只短期保存未焚毁的密文与必要状态，用于断线、刷新、重新进入后的恢复。
 
+## 项目地图
+
+新增功能、发布或接入外部视觉稿前，先看 `PROJECT_STRUCTURE.md`。当前主线约定：
+
+- 生产 Web 在 `apps/web/`。
+- 生产服务端在 `apps/server/`。
+- Capacitor App 在 `apps/mobile/`。
+- 服务器下载页在 `download/`。
+- Kimi 等外部生成的视觉原型只放 `references/`，不参与生产构建和发布。
+
 ## 技术栈
 
 - Frontend: Next.js + TypeScript + Tailwind CSS

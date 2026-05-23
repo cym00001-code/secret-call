@@ -37,6 +37,40 @@ test("two users can join the same room without endless loading", async ({ browse
   const passphrase = "test-pass-001";
   const { contextA, contextB, pageB } = await joinTwoUsers(browser, room, passphrase);
   await expect(pageB.getByText("正在唤醒")).toHaveCount(0);
+  await expect(pageB.getByText("对方在 网页端 打开")).toBeVisible();
+
+  await contextA.close();
+  await contextB.close();
+});
+
+test("session shows peer app platform and capture events appear in chat", async ({ browser }) => {
+  const room = `test-room-platform-${Date.now()}`;
+  const passphrase = "test-pass-001";
+  const contextA = await browser.newContext();
+  const contextB = await browser.newContext();
+  await contextB.addInitScript(() => {
+    window.__SECRET_ROOM_NATIVE_PLATFORM = "ios";
+  });
+  const pageA = await contextA.newPage();
+  const pageB = await contextB.newPage();
+
+  await joinRoom(pageA, room, passphrase);
+  await expect(pageA.getByText("等待另一端唤醒房间")).toBeVisible();
+  await joinRoom(pageB, room, passphrase);
+
+  await expect(pageA.getByText("对方在 iOS App 打开")).toBeVisible();
+  await expect(pageB.getByText("对方在 网页端 打开")).toBeVisible();
+
+  await pageB.evaluate(() => {
+    window.dispatchEvent(
+      new CustomEvent("security:capture_event", {
+        detail: { kind: "screenshot", platform: "ios", blocked: false, detectedAt: Date.now() }
+      })
+    );
+  });
+
+  await expect(pageA.getByText("对方 iOS App 端检测到截图风险，已触发提醒。")).toBeVisible();
+  await expect(pageB.getByText("本机 iOS App 端检测到截图风险，已触发提醒。")).toBeVisible();
 
   await contextA.close();
   await contextB.close();

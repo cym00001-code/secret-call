@@ -20,7 +20,7 @@ import {
 } from "lucide-react";
 import { useSecretRoom } from "@/hooks/useSecretRoom";
 import { OfflineSecretApp } from "@/components/OfflineSecretApp";
-import { burnOptions, type BurnAfterMs, type LocalMessage, type RoomState } from "@/types/protocol";
+import { burnOptions, type BurnAfterMs, type ClientPlatform, type LocalMessage, type RoomState } from "@/types/protocol";
 
 type RoomController = ReturnType<typeof useSecretRoom>;
 
@@ -275,6 +275,11 @@ function ChatRoom({ room }: { room: RoomController }) {
               </button>
             </div>
           </div>
+          <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] leading-relaxed text-mute">
+            <span>{peerPresenceLabel(room)}</span>
+            <span className="hidden h-3 w-px bg-line sm:inline-block" aria-hidden="true" />
+            <span>本机：{platformLabel(room.clientPlatform)}</span>
+          </div>
           <SecurityCode value={room.securityCode} />
         </div>
       </header>
@@ -381,6 +386,20 @@ function roomStatusLabel(state: RoomState) {
   if (state === "peer_offline") return "对方已离线，房间仍保留";
   if (state === "suspended") return "房间暂时无人在线，可重新唤醒";
   return "等待另一端";
+}
+
+function platformLabel(platform: ClientPlatform) {
+  if (platform === "android") return "Android App";
+  if (platform === "ios") return "iOS App";
+  return "网页端";
+}
+
+function peerPresenceLabel(room: RoomController) {
+  const presence = room.peerPresence;
+  if (room.roomState === "peer_offline" || presence.status === "offline") return "对方已离线";
+  if (presence.status === "online" && presence.platform) return `对方在 ${platformLabel(presence.platform)} 打开`;
+  if (room.roomState === "active") return "对方在线，端类型同步中";
+  return "等待对方端类型";
 }
 
 function SecurityCode({ value }: { value: string }) {

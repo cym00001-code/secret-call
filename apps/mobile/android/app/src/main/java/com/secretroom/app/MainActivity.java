@@ -11,4 +11,12 @@ public class MainActivity extends BridgeActivity {
         getWindow().setFlags(WindowManager.LayoutParams.FLAG_SECURE, WindowManager.LayoutParams.FLAG_SECURE);
         super.onCreate(savedInstanceState);
     }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        if (getBridge() != null && getBridge().getWebView() != null) {
+            getBridge().getWebView().evaluateJavascript("window.__SECRET_ROOM_NATIVE_PLATFORM = 'android';", null);
+        }
+    }
 }

@@ -61,6 +61,50 @@ test("legacy room:active event includes peers for cached ECDH clients", async ()
   }
 });
 
+test("presence update broadcasts peer platforms without requiring legacy public keys", async () => {
+  const roomIdHash = createRoomHash();
+  const clientA = { clientId: token("client"), platform: "web" };
+  const clientB = { clientId: token("client"), platform: "ios" };
+  const socketA = new WebSocket(wsUrl);
+  const socketB = new WebSocket(wsUrl);
+
+  try {
+    await waitForOpen(socketA);
+    socketA.send(JSON.stringify({ type: "room:join", roomIdHash, ...clientA }));
+    await waitForEvent(socketA, "room:waiting");
+
+    const presenceA = waitForEvent<{
+      type: "presence:update";
+      peers: Array<{ clientId: string; platform: string; openedAt: number; lastSeenAt: number }>;
+    }>(socketA, "presence:update");
+    const presenceB = waitForEvent<{
+      type: "presence:update";
+      peers: Array<{ clientId: string; platform: string; openedAt: number; lastSeenAt: number }>;
+    }>(socketB, "presence:update");
+
+    await waitForOpen(socketB);
+    socketB.send(JSON.stringify({ type: "room:join", roomIdHash, ...clientB }));
+
+    await expect(presenceA).resolves.toMatchObject({
+      type: "presence:update",
+      peers: expect.arrayContaining([
+        expect.objectContaining(clientA),
+        expect.objectContaining(clientB)
+      ])
+    });
+    await expect(presenceB).resolves.toMatchObject({
+      type: "presence:update",
+      peers: expect.arrayContaining([
+        expect.objectContaining(clientA),
+        expect.objectContaining(clientB)
+      ])
+    });
+  } finally {
+    socketA.close();
+    socketB.close();
+  }
+});
+
 test("legacy ciphertext can be forwarded between cached ECDH clients", async () => {
   const roomIdHash = createRoomHash();
   const clientA = { clientId: token("client"), publicKey: publicKey() };

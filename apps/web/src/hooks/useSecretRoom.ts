@@ -5,12 +5,14 @@ import { decryptMessagePayload, deriveRoomMaterial, encryptAttachment, encryptTe
 import type {
   BurnAfterMs,
   CipherMessage,
+  ClientPlatform,
   ClientEvent,
   DecryptedLocalAttachment,
   DisplayLocalAttachment,
   HistoryMessage,
   LocalMessage,
   LocalMessageStatus,
+  PeerPresenceView,
   RoomState,
   SecurityEventKind,
   ServerEvent
@@ -75,8 +77,36 @@ const createDisplayAttachment = (attachment: DecryptedLocalAttachment): DisplayL
 const securityKindText: Record<SecurityEventKind, string> = {
   screenshot: "截图",
   screen_recording_started: "录屏开始",
-  screen_recording_stopped: "录屏停止",
-  screen_projection: "投屏或镜像"
+  screen_recording_stopped: "录屏/投屏停止",
+  screen_projection: "录屏/投屏开始"
+};
+
+declare global {
+  interface Window {
+    Capacitor?: {
+      getPlatform?: () => string;
+    };
+    __SECRET_ROOM_NATIVE_PLATFORM?: ClientPlatform;
+  }
+}
+
+const defaultPeerPresence: PeerPresenceView = {
+  status: "unknown"
+};
+
+const getClientPlatform = (): ClientPlatform => {
+  if (typeof window === "undefined") return "web";
+  const nativePlatform = window.__SECRET_ROOM_NATIVE_PLATFORM;
+  if (nativePlatform === "android" || nativePlatform === "ios") return nativePlatform;
+  const capacitorPlatform = window.Capacitor?.getPlatform?.();
+  if (capacitorPlatform === "android" || capacitorPlatform === "ios") return capacitorPlatform;
+  return "web";
+};
+
+const platformText = (platform: ClientPlatform) => {
+  if (platform === "android") return "Android App 端";
+  if (platform === "ios") return "iOS App 端";
+  return "网页端";
 };
 
 export const useSecretRoom = () => {
@@ -88,6 +118,8 @@ export const useSecretRoom = () => {
   const [statusText, setStatusText] = useState("");
   const [isBlurred, setIsBlurred] = useState(false);
   const [isWindowHidden, setIsWindowHidden] = useState(false);
+  const [clientPlatform] = useState<ClientPlatform>(() => getClientPlatform());
+  const [peerPresence, setPeerPresence] = useState<PeerPresenceView>(defaultPeerPresence);
   const [now, setNow] = useState(() => Date.now());
 
   const messagesRef = useRef<LocalMessage[]>([]);
@@ -172,6 +204,7 @@ export const useSecretRoom = () => {
     seenSentRef.current.clear();
     deliveredSentRef.current.clear();
     decryptedSentRef.current.clear();
+    setPeerPresence(defaultPeerPresence);
     setMessages([]);
     setSecurityCode("");
   }, [clearBurnTimers, clearJoinTimeout, revokeMessageAttachments]);
@@ -289,6 +322,34 @@ export const useSecretRoom = () => {
     },
     [sendEvent]
   );
+
+  const markPeerOffline = useCallback(() => {
+    setPeerPresence((current) => ({
+      ...current,
+      status: "offline"
+    }));
+  }, []);
+
+  const handlePresenceUpdate = useCallback((event: Extract<ServerEvent, { type: "presence:update" }>) => {
+    const active = activeRef.current;
+    if (!active) return;
+
+    const peer = event.peers.find((item) => item.clientId !== active.clientId);
+    if (!peer) {
+      setPeerPresence((current) => ({
+        ...current,
+        status: roomStateRef.current === "active" ? "unknown" : "offline"
+      }));
+      return;
+    }
+
+    setPeerPresence({
+      status: "online",
+      platform: peer.platform,
+      openedAt: peer.openedAt,
+      lastSeenAt: peer.lastSeenAt
+    });
+  }, []);
 
   const sendDelivered = useCallback(
     (messageId: string) => {
@@ -475,6 +536,10 @@ export const useSecretRoom = () => {
         case "room:active":
           clearJoinTimeout();
           setStatusText("双方在线");
+          setPeerPresence((current) => ({
+            ...current,
+            status: current.platform ? "online" : "unknown"
+          }));
           setRoomStateValue("active");
           setMessages((current) =>
             current.map((message) =>
@@ -485,6 +550,7 @@ export const useSecretRoom = () => {
         case "room:peer_offline":
           clearJoinTimeout();
           setStatusText("对方已离线，房间仍保留");
+          markPeerOffline();
           setRoomStateValue("peer_offline");
           setMessages((current) =>
             current.map((message) =>
@@ -503,6 +569,9 @@ export const useSecretRoom = () => {
           setStatusText("房间已恢复，正在同步未焚毁密文");
           break;
         case "room:sync":
+          break;
+        case "presence:update":
+          handlePresenceUpdate(event);
           break;
         case "room:unavailable":
           clearJoinTimeout();
@@ -547,16 +616,21 @@ export const useSecretRoom = () => {
           const actor = isMe ? "本机" : "对方";
           const action = securityKindText[event.kind];
           const result = event.blocked ? "已被系统保护阻止或遮挡" : "已触发提醒";
-          addSystemMessage(`${actor}检测到${action}风险，${result}。`, event.serverTime);
+          addSystemMessage(`${actor} ${platformText(event.platform)}检测到${action}风险，${result}。`, event.serverTime);
           if (isMe) setIsWindowHidden(true);
           break;
         }
         case "peer:left":
           setStatusText("对方已离线，房间仍保留");
+          markPeerOffline();
           setRoomStateValue("peer_offline");
           break;
         case "peer:reconnected":
           setStatusText("双方在线");
+          setPeerPresence((current) => ({
+            ...current,
+            status: current.platform ? "online" : "unknown"
+          }));
           setRoomStateValue("active");
           break;
         case "room:destroyed":
@@ -589,6 +663,8 @@ export const useSecretRoom = () => {
       closeSocket,
       clearJoinTimeout,
       handleEncryptedMessage,
+      handlePresenceUpdate,
+      markPeerOffline,
       markBurning,
       removeBurnedMessage,
       setRoomStateValue,
@@ -645,7 +721,8 @@ export const useSecretRoom = () => {
           sendEvent({
             type: "room:join",
             roomIdHash: active.roomIdHash,
-            clientId: active.clientId
+            clientId: active.clientId,
+            platform: getClientPlatform()
           });
           heartbeatRef.current = setInterval(() => {
             sendEvent({ type: "ping", clientId: active.clientId, sentAt: Date.now() });
@@ -860,7 +937,7 @@ export const useSecretRoom = () => {
       detectedAt
     }: {
       kind: SecurityEventKind;
-      platform: "android" | "ios" | "web";
+      platform: ClientPlatform;
       blocked: boolean;
       detectedAt: number;
     }) => {
@@ -960,7 +1037,10 @@ export const useSecretRoom = () => {
       }
       reportSecurityEvent({
         kind: detail.kind as SecurityEventKind,
-        platform: detail.platform === "android" || detail.platform === "ios" ? detail.platform : "web",
+        platform:
+          detail.platform === "android" || detail.platform === "ios" || detail.platform === "web"
+            ? detail.platform
+            : clientPlatform,
         blocked: Boolean("blocked" in detail ? detail.blocked : false),
         detectedAt: typeof detail.detectedAt === "number" ? detail.detectedAt : Date.now()
       });
@@ -968,7 +1048,7 @@ export const useSecretRoom = () => {
 
     window.addEventListener("security:capture_event", listener);
     return () => window.removeEventListener("security:capture_event", listener);
-  }, [reportSecurityEvent]);
+  }, [clientPlatform, reportSecurityEvent]);
 
   useEffect(
     () => () => {
@@ -988,6 +1068,8 @@ export const useSecretRoom = () => {
       statusText,
       isBlurred,
       isWindowHidden,
+      clientPlatform,
+      peerPresence,
       now,
       joinRoom,
       sendTextMessage,
@@ -1007,7 +1089,9 @@ export const useSecretRoom = () => {
       joinRoom,
       messages,
       now,
+      clientPlatform,
       confirmPeerMessageSeen,
+      peerPresence,
       reset,
       revealWindow,
       roomNumber,

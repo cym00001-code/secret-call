@@ -8,6 +8,8 @@ Android is the first supported release target.
 - The bundled UI connects to `https://8.138.150.200` for HTTP APIs and `wss://8.138.150.200/ws` for room WebSocket traffic.
 - Android must enable `FLAG_SECURE` on the main activity before rendering sensitive content.
 - iOS can only detect screenshots/screen capture and warn users; it cannot block system screenshots.
+- Android/iOS native shells inject `window.__SECRET_ROOM_NATIVE_PLATFORM` so the web UI can show whether the peer is using the web page or an app.
+- iOS screenshot and screen capture changes are bridged into the web UI through `security:capture_event`; the room then broadcasts a `security:event` system reminder.
 
 ## Release Notes
 

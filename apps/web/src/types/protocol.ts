@@ -10,6 +10,7 @@ export type RoomState =
   | "expired";
 
 export type BurnAfterMs = 5000 | 10000 | 30000 | 60000;
+export type ClientPlatform = "web" | "android" | "ios";
 export type AttachmentKind = "image" | "video";
 export type OfflineUnreadTtlMs = 3600000 | 86400000 | 604800000;
 export type OfflineReadTtlMs = 5000 | 30000 | 60000;
@@ -120,11 +121,26 @@ export interface LocalMessage {
   status: LocalMessageStatus;
 }
 
+export interface PeerPresence {
+  clientId: string;
+  platform: ClientPlatform;
+  openedAt: number;
+  lastSeenAt: number;
+}
+
+export interface PeerPresenceView {
+  status: "unknown" | "online" | "offline";
+  platform?: ClientPlatform;
+  openedAt?: number;
+  lastSeenAt?: number;
+}
+
 export type ClientEvent =
   | {
       type: "room:join";
       roomIdHash: string;
       clientId: string;
+      platform?: ClientPlatform;
     }
   | {
       type: "room:leave";
@@ -173,7 +189,7 @@ export type ClientEvent =
       roomIdHash: string;
       clientId: string;
       kind: SecurityEventKind;
-      platform: "android" | "ios" | "web";
+      platform: ClientPlatform;
       blocked: boolean;
       detectedAt: number;
     }
@@ -193,6 +209,7 @@ export type ServerEvent =
   | { type: "room:expired"; serverTime: number }
   | { type: "room:unavailable" }
   | { type: "room:sync"; serverTime: number }
+  | { type: "presence:update"; peers: PeerPresence[]; serverTime: number }
   | { type: "message:server_ack"; messageId: string; state: "server_ack" | "stored"; serverTime: number }
   | { type: "message:receive"; message: CipherMessage; state: PendingMessageState; serverTime: number }
   | { type: "message:history"; messages: HistoryMessage[]; serverTime: number }
@@ -205,7 +222,7 @@ export type ServerEvent =
   | {
       type: "security:event";
       kind: SecurityEventKind;
-      platform: "android" | "ios" | "web";
+      platform: ClientPlatform;
       blocked: boolean;
       detectedAt: number;
       byClientId: string;

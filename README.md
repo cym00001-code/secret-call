@@ -117,6 +117,14 @@ V2 不再因为一方离开就销毁房间。
 9. 倒计时结束后客户端发送 `message:burn`。
 10. 服务端广播 `message:burn`，并从 `pendingMessages` 删除消息。
 
+## 端类型与截图提醒
+
+- 客户端进入房间时会上报 `platform`：`web`、`android` 或 `ios`。
+- 服务端只在成员身份校验通过后广播 `presence:update`，用于让双方看到“对方在网页端/App 端打开”。
+- Android App 使用系统级防截图保护；iOS App 只能在截图后、录屏或投屏状态变化时提醒，不能阻止系统截图。
+- App 原生层通过 `security:capture_event` 通知 Web 层，Web 层再发送 `security:event`，服务端校验房间成员后广播会话内系统提醒。
+- 端类型同步和截图提醒不参与消息 `seen/burning/burn` 状态机，不会触发阅后即焚倒计时。
+
 ## WebSocket 事件
 
 客户端发送：
@@ -131,6 +139,7 @@ V2 不再因为一方离开就销毁房间。
 - `message:visible`
 - `message:seen`
 - `message:burn`
+- `security:event`
 - `ping`
 
 服务端发送：
@@ -153,6 +162,8 @@ V2 不再因为一方离开就销毁房间。
 - `message:seen`
 - `message:burn`
 - `message:failed`
+- `presence:update`
+- `security:event`
 - `peer:left`
 - `peer:reconnected`
 - `error`

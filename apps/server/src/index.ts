@@ -5,6 +5,7 @@ import fastify from "fastify";
 import { WebSocket, WebSocketServer, type RawData } from "ws";
 import {
   type BurnAfterMs,
+  type ClientPlatform,
   type CipherMessage,
   type ClientCipherMessage,
   type ClientEvent,
@@ -28,6 +29,7 @@ interface ClientState {
   joinedAt: number;
   lastSeenAt: number;
   closed: boolean;
+  platform: ClientPlatform;
 }
 
 interface PendingEncryptedMessage extends HistoryMessage {
@@ -137,6 +139,24 @@ const legacyRoomPeers = (room: RoomState) =>
       publicKey: client.publicKey
     }));
 
+const roomPresence = (room: RoomState) =>
+  [...room.clients.values()]
+    .filter((client): client is ClientState & { clientId: string } => typeof client.clientId === "string")
+    .map((client) => ({
+      clientId: client.clientId,
+      platform: client.platform,
+      openedAt: client.joinedAt,
+      lastSeenAt: client.lastSeenAt
+    }));
+
+const broadcastPresence = (room: RoomState, serverTime = Date.now()) => {
+  broadcast(room, {
+    type: "presence:update",
+    peers: roomPresence(room),
+    serverTime
+  });
+};
+
 const send = (client: ClientState, event: ServerEvent) => {
   if (client.ws.readyState !== WebSocket.OPEN) return;
   client.ws.send(JSON.stringify(event));
@@ -192,7 +212,11 @@ const isSecurityEventKind = (value: unknown) =>
   value === "screen_recording_stopped" ||
   value === "screen_projection";
 
-const isSecurityPlatform = (value: unknown) => value === "android" || value === "ios" || value === "web";
+const isSecurityPlatform = (value: unknown): value is ClientPlatform =>
+  value === "android" || value === "ios" || value === "web";
+
+const normalizeClientPlatform = (value: unknown): ClientPlatform =>
+  isSecurityPlatform(value) ? value : "web";
 
 const isOfflineSecretCreateBody = (
   value: unknown
@@ -392,13 +416,14 @@ const detachClientFromRoom = (client: ClientState, reason: string) => {
   if (!room) return;
 
   room.clients.delete(clientId);
-  room.updatedAt = Date.now();
+  const now = Date.now();
+  room.updatedAt = now;
 
   if (room.destroying) return;
 
   if (room.clients.size === 0) {
     room.status = "suspended";
-    room.suspendedAt = Date.now();
+    room.suspendedAt = now;
     logWs("room:suspended", {
       roomIdHash,
       clientId,
@@ -411,9 +436,10 @@ const detachClientFromRoom = (client: ClientState, reason: string) => {
   room.status = "peer_offline";
   delete room.suspendedAt;
   for (const remaining of room.clients.values()) {
-    send(remaining, { type: "peer:left", serverTime: Date.now() });
-    send(remaining, { type: "room:peer_offline", serverTime: Date.now() });
+    send(remaining, { type: "peer:left", serverTime: now });
+    send(remaining, { type: "room:peer_offline", serverTime: now });
   }
+  broadcastPresence(room, now);
 
   logWs("room:peer_offline", {
     roomIdHash,
@@ -443,7 +469,12 @@ const getJoinedRoom = (client: ClientState, roomIdHash: string, clientId: string
 };
 
 const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "room:join" }>) => {
-  if (!isRoomHash(event.roomIdHash) || !isSafeToken(event.clientId, 12, 96) || !isLegacyPublicKey(event.publicKey)) {
+  if (
+    !isRoomHash(event.roomIdHash) ||
+    !isSafeToken(event.clientId, 12, 96) ||
+    !isLegacyPublicKey(event.publicKey) ||
+    (event.platform !== undefined && !isSecurityPlatform(event.platform))
+  ) {
     send(client, { type: "room:unavailable" });
     logWs("room:join", {
       roomIdHash: typeof event.roomIdHash === "string" ? event.roomIdHash : undefined,
@@ -503,6 +534,7 @@ const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "ro
   if (event.publicKey) {
     client.publicKey = event.publicKey;
   }
+  client.platform = normalizeClientPlatform(event.platform);
   client.roomIdHash = event.roomIdHash;
   client.joinedAt = now;
   client.lastSeenAt = now;
@@ -521,6 +553,7 @@ const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "ro
       type: room.status === "waiting" ? "room:waiting" : "room:peer_offline",
       serverTime: now
     });
+    broadcastPresence(room, now);
     sendHistory(client, room);
     logWs("room:join", {
       roomIdHash: event.roomIdHash,
@@ -546,6 +579,7 @@ const handleJoin = (client: ClientState, event: Extract<ClientEvent, { type: "ro
       send(peer, { type: "peer:reconnected", serverTime: now });
     }
   }
+  broadcastPresence(room, now);
   sendHistory(client, room);
 
   logWs("room:join", {
@@ -574,7 +608,9 @@ const handleSync = (client: ClientState, event: Extract<ClientEvent, { type: "ro
     return;
   }
 
-  send(client, { type: "room:sync", serverTime: Date.now() });
+  const now = Date.now();
+  send(client, { type: "room:sync", serverTime: now });
+  send(client, { type: "presence:update", peers: roomPresence(room), serverTime: now });
   sendHistory(client, room);
 };
 
@@ -892,7 +928,8 @@ wss.on("connection", (ws, request) => {
     ipRiskHash,
     joinedAt: Date.now(),
     lastSeenAt: Date.now(),
-    closed: false
+    closed: false,
+    platform: "web"
   };
   clients.add(client);
 

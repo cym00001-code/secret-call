@@ -29,17 +29,27 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
     }
 
     @objc private func capturedDidChange() {
-        dispatchSecurityEvent(kind: UIScreen.main.isCaptured ? "screen_recording_started" : "screen_recording_stopped", blocked: false)
+        dispatchSecurityEvent(kind: UIScreen.main.isCaptured ? "screen_projection" : "screen_recording_stopped", blocked: false)
     }
 
     private func dispatchSecurityEvent(kind: String, blocked: Bool) {
         let script = """
+        window.__SECRET_ROOM_NATIVE_PLATFORM = 'ios';
         window.dispatchEvent(new CustomEvent('security:capture_event', {
           detail: { kind: '\(kind)', platform: 'ios', blocked: \(blocked), detectedAt: Date.now() }
         }));
         """
         if let bridgeViewController = window?.rootViewController as? CAPBridgeViewController {
             bridgeViewController.webView?.evaluateJavaScript(script)
+        }
+    }
+
+    func applicationDidBecomeActive(_ application: UIApplication) {
+        if let bridgeViewController = window?.rootViewController as? CAPBridgeViewController {
+            bridgeViewController.webView?.evaluateJavaScript("window.__SECRET_ROOM_NATIVE_PLATFORM = 'ios';")
+        }
+        if UIScreen.main.isCaptured {
+            dispatchSecurityEvent(kind: "screen_projection", blocked: false)
         }
     }
 }

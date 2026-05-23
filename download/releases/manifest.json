@@ -11,6 +11,8 @@
   },
   "ios": {
     "available": false,
-    "notes": "iOS 第一版仅做能力预留；后续如使用 TestFlight 或其他分发方式，会在此页面更新。"
+    "label": "iOS 下载暂未开放",
+    "url": "",
+    "notes": "iOS 版本需要通过 TestFlight、企业签名或其他合规分发方式提供。当前暂不放安装包；开放后会在此页面更新独立下载入口。"
   }
 }

@@ -1,4 +1,5 @@
 export type BurnAfterMs = 5000 | 10000 | 30000 | 60000;
+export type ClientPlatform = "web" | "android" | "ios";
 export type SecurityEventKind = "screenshot" | "screen_recording_started" | "screen_recording_stopped" | "screen_projection";
 
 export type PendingMessageState =
@@ -44,6 +45,7 @@ export type ClientEvent =
       roomIdHash: string;
       clientId: string;
       publicKey?: string;
+      platform?: ClientPlatform;
     }
   | {
       type: "room:leave";
@@ -92,7 +94,7 @@ export type ClientEvent =
       roomIdHash: string;
       clientId: string;
       kind: SecurityEventKind;
-      platform: "android" | "ios" | "web";
+      platform: ClientPlatform;
       blocked: boolean;
       detectedAt: number;
     }
@@ -107,6 +109,13 @@ export interface RoomPeer {
   publicKey: string;
 }
 
+export interface PeerPresence {
+  clientId: string;
+  platform: ClientPlatform;
+  openedAt: number;
+  lastSeenAt: number;
+}
+
 export type ServerEvent =
   | { type: "room:waiting"; serverTime: number }
   | { type: "room:active"; serverTime: number; peers?: RoomPeer[] }
@@ -117,6 +126,7 @@ export type ServerEvent =
   | { type: "room:expired"; serverTime: number }
   | { type: "room:unavailable" }
   | { type: "room:sync"; serverTime: number }
+  | { type: "presence:update"; peers: PeerPresence[]; serverTime: number }
   | { type: "message:server_ack"; messageId: string; state: "server_ack" | "stored"; serverTime: number }
   | { type: "message:receive"; message: CipherMessage; state: PendingMessageState; serverTime: number }
   | { type: "message:history"; messages: HistoryMessage[]; serverTime: number }
@@ -129,7 +139,7 @@ export type ServerEvent =
   | {
       type: "security:event";
       kind: SecurityEventKind;
-      platform: "android" | "ios" | "web";
+      platform: ClientPlatform;
       blocked: boolean;
       detectedAt: number;
       byClientId: string;
